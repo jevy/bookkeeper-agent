@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tiller-categorizer
+  labels:
+    app: tiller-categorizer
+    component: categorizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tiller-categorizer
+      component: categorizer
+  template:
+    metadata:
+      labels:
+        app: tiller-categorizer
+        component: categorizer
+    spec:
+      containers:
+        - name: categorizer
+          image: tiller-categorizer-agent:latest
+          args: ["categorizer"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "redpanda.apps.svc.cluster.local:9093"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://redpanda.apps.svc.cluster.local:8081"
+            - name: GOOGLE_SHEET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: google-sheet-id
+            - name: GOOGLE_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: google-credentials-json
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: anthropic-api-key
+            - name: BRAVE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: brave-api-key
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

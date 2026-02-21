@@ -1,0 +1,23 @@
+{
+  "type": "record",
+  "name": "Transaction",
+  "namespace": "org.jevy.tiller_categorizer_agent",
+  "fields": [
+    {"name": "transaction_id",   "type": "string",            "doc": "Yodlee-generated unique ID (Kafka message key)"},
+    {"name": "date",             "type": "string",            "doc": "Transaction date (M/d/yyyy)"},
+    {"name": "description",      "type": "string",            "doc": "Short merchant description"},
+    {"name": "category",         "type": ["null", "string"],  "default": null, "doc": "Category — null when uncategorized"},
+    {"name": "amount",           "type": "string",            "doc": "Amount as string (e.g., '-$384.91')"},
+    {"name": "account",          "type": "string",            "doc": "Account name"},
+    {"name": "account_number",   "type": ["null", "string"],  "default": null, "doc": "Masked account number"},
+    {"name": "institution",      "type": ["null", "string"],  "default": null, "doc": "Bank/institution name"},
+    {"name": "month",            "type": ["null", "string"],  "default": null, "doc": "Month start date"},
+    {"name": "week",             "type": ["null", "string"],  "default": null, "doc": "Week start date"},
+    {"name": "check_number",     "type": ["null", "string"],  "default": null, "doc": "Check number if applicable"},
+    {"name": "full_description", "type": ["null", "string"],  "default": null, "doc": "Full merchant description from Yodlee"},
+    {"name": "note",             "type": ["null", "string"],  "default": null, "doc": "User notes"},
+    {"name": "source",           "type": ["null", "string"],  "default": null, "doc": "Data source (e.g., Yodlee)"},
+    {"name": "date_added",       "type": ["null", "string"],  "default": null, "doc": "When Tiller imported the transaction"},
+    {"name": "sheet_row_number", "type": "int",               "doc": "Row number in the Google Sheet (for write-back)"}
+  ]
+}

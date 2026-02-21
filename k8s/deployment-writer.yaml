@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tiller-writer
+  labels:
+    app: tiller-categorizer
+    component: writer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tiller-categorizer
+      component: writer
+  template:
+    metadata:
+      labels:
+        app: tiller-categorizer
+        component: writer
+    spec:
+      containers:
+        - name: writer
+          image: tiller-categorizer-agent:latest
+          args: ["writer"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "redpanda.apps.svc.cluster.local:9093"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://redpanda.apps.svc.cluster.local:8081"
+            - name: GOOGLE_SHEET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: google-sheet-id
+            - name: GOOGLE_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: google-credentials-json
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

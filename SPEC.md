@@ -37,8 +37,8 @@ Three services packaged as a single Docker image with different entrypoints. Pol
 ┌────▼───────────────┴──┐
 │      Service 2        │
 │   Categorizer Agent   │
-│  (Sonnet 4.6 via      │
-│   OpenRouter)         │
+│  (Sonnet 4.5 via      │
+│   Anthropic SDK)      │
 └───────────────────────┘
 ```
 
@@ -65,7 +65,7 @@ Consumes uncategorized transactions and uses an AI agent to determine the correc
 
 - **Input**: `transactions.uncategorized` topic
 - **Output**: `transactions.categorized` topic
-- **AI model**: Anthropic Sonnet 4.6 via OpenRouter API
+- **AI model**: Anthropic Sonnet 4.5 via Anthropic Java SDK
 - **Agent tools**:
   1. **Sheet lookup** — Query the Google Sheet for past transactions with similar descriptions that already have categories assigned. Used to learn from historical categorization patterns (e.g., "COSTCO WHOLESAL" was previously categorized as "Groceries").
   2. **Web search** — For unfamiliar merchants, search the web to understand what the business is (e.g., "what is TRNSFR TO SAV 4832?"). Implementation TBD (Brave Search API, SerpAPI, or similar).
@@ -172,8 +172,8 @@ Consumes categorized transactions and writes the category back to the Google She
 | Avro                | `org.apache.avro:avro`          | With Gradle Avro plugin for code generation     |
 | Schema Registry     | Confluent Avro serializer/deserializer | Compatible with Redpanda's built-in registry |
 | Google Sheets       | `com.google.api-client` + `com.google.apis:google-api-services-sheets` | Service account auth |
-| AI Agent            | Sonnet 4.6 via OpenRouter       | `anthropic/claude-sonnet-4.6` model ID          |
-| HTTP client         | OkHttp or ktor-client           | For OpenRouter API calls                        |
+| AI Agent            | Sonnet 4.5 via Anthropic Java SDK | `com.anthropic:anthropic-java`                |
+| HTTP client         | OkHttp                          | For Brave web search API calls                  |
 | Container           | Single Docker image             | Different entrypoints per service               |
 | Deployment          | Kubernetes (existing homelab)   | Three Deployments, same image, different args   |
 
@@ -202,7 +202,7 @@ tiller-categorizer-agent/
 │       │   │   └── TransactionProducer.kt       # Polls sheet, publishes uncategorized
 │       │   ├── categorizer/
 │       │   │   ├── CategorizerAgent.kt          # Orchestrates agent loop
-│       │   │   ├── OpenRouterClient.kt          # OpenRouter API client
+│       │   │   ├── (uses Anthropic Java SDK)     # Claude API via SDK
 │       │   │   └── tools/
 │       │   │       ├── SheetLookupTool.kt       # Query historical transactions
 │       │   │       └── WebSearchTool.kt         # Web search for unknown merchants
@@ -228,7 +228,7 @@ tiller-categorizer-agent/
 | `SCHEMA_REGISTRY_URL`       | All                  | Redpanda schema registry URL             |
 | `GOOGLE_SHEET_ID`           | Producer, Writer, Categorizer | The spreadsheet ID from the sheet URL |
 | `GOOGLE_CREDENTIALS_JSON`   | Producer, Writer, Categorizer | Service account JSON key (as string or file path) |
-| `OPENROUTER_API_KEY`        | Categorizer          | OpenRouter API key                       |
+| `ANTHROPIC_API_KEY`         | Categorizer          | Anthropic API key                        |
 | `POLL_INTERVAL_SECONDS`     | Producer             | How often to poll (default: 300)         |
 
 ## Kafka Cluster Details (Existing)
@@ -241,7 +241,7 @@ tiller-categorizer-agent/
 
 ## Agent Design (Service 2)
 
-The categorizer uses Sonnet 4.6 via OpenRouter with function calling / tool use.
+The categorizer uses Sonnet 4.5 via the Anthropic Java SDK with function calling / tool use.
 
 ### System Prompt
 

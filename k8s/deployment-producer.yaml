@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tiller-producer
+  labels:
+    app: tiller-categorizer
+    component: producer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tiller-categorizer
+      component: producer
+  template:
+    metadata:
+      labels:
+        app: tiller-categorizer
+        component: producer
+    spec:
+      containers:
+        - name: producer
+          image: tiller-categorizer-agent:latest
+          args: ["producer"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "redpanda.apps.svc.cluster.local:9093"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://redpanda.apps.svc.cluster.local:8081"
+            - name: GOOGLE_SHEET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: google-sheet-id
+            - name: GOOGLE_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: tiller-categorizer
+                  key: google-credentials-json
+            - name: POLL_INTERVAL_SECONDS
+              value: "300"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
