@@ -30,12 +30,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: tiller-categorizer
-                  key: google-sheet-id
+                  key: GOOGLE_SHEET_ID
             - name: GOOGLE_CREDENTIALS_JSON
               valueFrom:
                 secretKeyRef:
                   name: tiller-categorizer
-                  key: google-credentials-json
+                  key: GOOGLE_CREDENTIALS_JSON
           resources:
             requests:
               memory: "256Mi"
