@@ -53,13 +53,14 @@ class CategorizerAgent(private val config: AppConfig) {
 
         Rules:
         - Use ONLY the categories listed above. Never invent new categories.
+        - First check autocat_lookup to see if there's a matching rule for the transaction description.
         - Look at past transactions with similar descriptions to determine the category.
         - If a merchant is unfamiliar, use web search to understand what the business is.
         - Before giving your final answer, use category_lookup to review the last 20 transactions in your proposed category. Make sure the transaction fits the pattern.
-        - If you cannot determine a category with confidence, respond with null.
+        - If you are less than 70% confident in a category, use "Unknown".
 
-        When you have determined the category, call the submit_category tool with the category and justification.
-        If you cannot determine a category with confidence, call submit_category with category "null".
+        You have a maximum of 5 tool calls for research (sheet_lookup, web_search, category_lookup, autocat_lookup).
+        You MUST call submit_category with your final answer. Do not exceed 5 research calls.
         ${config.additionalContextPrompt?.let { "\nAdditional context about the user:\n$it" } ?: ""}
         """.trimIndent()
     }
@@ -113,6 +114,23 @@ class CategorizerAgent(private val config: AppConfig) {
                             .build()
                     )
                     .addRequired("category")
+                    .build()
+            )
+            .build(),
+        Tool.builder()
+            .name("autocat_lookup")
+            .description("Search the AutoCat rules sheet for matching categorization rules. AutoCat rules map transaction descriptions to categories. Check this first to see if a rule already exists for the transaction.")
+            .inputSchema(
+                Tool.InputSchema.builder()
+                    .properties(
+                        Tool.InputSchema.Properties.builder()
+                            .putAdditionalProperty("description", JsonValue.from(mapOf(
+                                "type" to "string",
+                                "description" to "The transaction description to match against AutoCat rules",
+                            )))
+                            .build()
+                    )
+                    .addRequired("description")
                     .build()
             )
             .build(),
@@ -195,7 +213,7 @@ class CategorizerAgent(private val config: AppConfig) {
                 .build()
         )
 
-        repeat(8) { // max tool-use rounds
+        repeat(7) { // max tool-use rounds
             val paramsBuilder = MessageCreateParams.builder()
                 .model(Model.of(config.anthropicModel))
                 .maxTokens(1024L)
@@ -259,6 +277,12 @@ class CategorizerAgent(private val config: AppConfig) {
                             val category = args["category"]!!.asStringOrThrow()
                             val results = sheetsClient.searchByCategory(category)
                             logger.info("Category lookup '{}': {} transactions", category, results.size)
+                            com.google.gson.Gson().toJson(results)
+                        }
+                        "autocat_lookup" -> {
+                            val description = args["description"]!!.asStringOrThrow()
+                            val results = sheetsClient.searchAutocat(description)
+                            logger.info("AutoCat lookup '{}': {} rules matched", description, results.size)
                             com.google.gson.Gson().toJson(results)
                         }
                         else -> "Unknown tool: ${toolUse.name()}"

@@ -84,6 +84,23 @@ class SheetsClient(private val config: AppConfig) {
             }
     }
 
+    fun searchAutocat(query: String): List<Map<String, String>> {
+        val rows = readAllRows("AutoCat!A:G")
+        if (rows.size <= 1) return emptyList()
+
+        val header = rows.first().map { it.toString() }
+        val colIndex = header.withIndex().associate { (i, name) -> name to i }
+        val descContainsIdx = colIndex["Description Contains"] ?: return emptyList()
+        val queryLower = query.lowercase()
+
+        return rows.drop(1)
+            .filter { row ->
+                val descContains = row.getOrNull(descContainsIdx)?.toString()?.lowercase() ?: ""
+                descContains.isNotBlank() && queryLower.contains(descContains)
+            }
+            .map { row -> header.zip(row.map { it.toString() }).toMap() }
+    }
+
     fun searchByDescription(query: String): List<Map<String, String>> {
         val rows = readAllRows()
         if (rows.isEmpty()) return emptyList()
