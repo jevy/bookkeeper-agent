@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tiller-topic-init
+  labels:
+    app: tiller-categorizer
+    component: topic-init
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: tiller-categorizer
+        component: topic-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: topic-init
+          image: ghcr.io/jevy/tiller-categorizer-agent:0.7.0
+          args: ["init"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "redpanda.apps.svc.cluster.local:9093"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
