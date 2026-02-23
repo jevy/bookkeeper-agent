@@ -23,7 +23,10 @@ object TopicInitializer {
     private val topics = listOf(
         TopicSpec(
             name = TopicNames.UNCATEGORIZED,
-            config = mapOf(TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT),
+            config = mapOf(
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_DELETE,
+                TopicConfig.RETENTION_MS_CONFIG to "604800000", // 7 days
+            ),
         ),
         TopicSpec(
             name = TopicNames.CATEGORIZED,
