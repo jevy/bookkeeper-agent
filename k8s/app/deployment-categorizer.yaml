@@ -36,11 +36,11 @@ spec:
                 secretKeyRef:
                   name: tiller-categorizer
                   key: GOOGLE_CREDENTIALS_JSON
-            - name: ANTHROPIC_API_KEY
+            - name: OPENROUTER_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: tiller-categorizer
-                  key: ANTHROPIC_API_KEY
+                  key: OPENROUTER_API_KEY
             - name: BRAVE_API_KEY
               valueFrom:
                 secretKeyRef:

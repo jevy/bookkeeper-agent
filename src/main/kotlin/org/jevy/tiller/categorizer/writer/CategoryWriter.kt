@@ -1,5 +1,7 @@
 package org.jevy.tiller.categorizer.writer
 
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.jevy.tiller.categorizer.config.AppConfig
 import org.jevy.tiller.categorizer.kafka.KafkaFactory
 import org.jevy.tiller.categorizer.kafka.TopicNames
@@ -10,9 +12,18 @@ import java.time.Duration
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
-class CategoryWriter(private val config: AppConfig, private val sheetsClient: SheetsClient = SheetsClient(config)) {
+class CategoryWriter(
+    private val config: AppConfig,
+    private val sheetsClient: SheetsClient = SheetsClient(config),
+    private val meterRegistry: MeterRegistry = SimpleMeterRegistry(),
+) {
 
     private val logger = LoggerFactory.getLogger(CategoryWriter::class.java)
+
+    private val writtenCounter = meterRegistry.counter("tiller.writer.transactions.written")
+    private val skippedCounter = meterRegistry.counter("tiller.writer.transactions.skipped")
+    private val errorsCounter = meterRegistry.counter("tiller.writer.errors")
+    private val durationTimer = meterRegistry.timer("tiller.writer.duration")
 
     // Resolve column letters from header row on first use
     private val columnLetters: Map<String, String> by lazy {
@@ -42,8 +53,9 @@ class CategoryWriter(private val config: AppConfig, private val sheetsClient: Sh
             val records = consumer.poll(Duration.ofSeconds(5))
             for (record in records) {
                 try {
-                    writeCategory(record.value())
+                    durationTimer.record(Runnable { writeCategory(record.value()) })
                 } catch (e: Exception) {
+                    errorsCounter.increment()
                     logger.error("Error writing category for transaction {}", record.key(), e)
                 }
             }
@@ -59,10 +71,11 @@ class CategoryWriter(private val config: AppConfig, private val sheetsClient: Sh
         }
 
         val transactionId = transaction.getTransactionId().toString()
-        val rowNumber = findRow(transactionId, transaction.getSheetRowNumber())
+        val rowNumber = findRow(transactionId)
 
         if (rowNumber == null) {
             logger.warn("Could not find row for transaction {}", transactionId)
+            skippedCounter.increment()
             return
         }
 
@@ -74,6 +87,7 @@ class CategoryWriter(private val config: AppConfig, private val sheetsClient: Sh
         val existing = rows.firstOrNull()?.firstOrNull()?.toString() ?: ""
         if (existing.isNotBlank()) {
             logger.info("Transaction {} already has category '{}', skipping", transactionId, existing)
+            skippedCounter.increment()
             return
         }
 
@@ -81,18 +95,11 @@ class CategoryWriter(private val config: AppConfig, private val sheetsClient: Sh
         sheetsClient.writeCell("Transactions!${categoryCol}$rowNumber", category)
         sheetsClient.writeCell("Transactions!${categorizedDateCol}$rowNumber", LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy")))
         logger.info("Wrote category '{}' to row {} for transaction {}", category, rowNumber, transactionId)
+        writtenCounter.increment()
     }
 
-    internal fun findRow(transactionId: String, hintRow: Int): Int? {
+    internal fun findRow(transactionId: String): Int? {
         val txIdCol = columnLetters["Transaction ID"] ?: "J"
-
-        // Try the hint row first
-        val hintRows = sheetsClient.readAllRows("Transactions!${txIdCol}$hintRow:${txIdCol}$hintRow")
-        val hintId = hintRows.firstOrNull()?.firstOrNull()?.toString() ?: ""
-        if (hintId == transactionId) return hintRow
-
-        // Fall back to scanning all rows
-        logger.debug("Hint row {} didn't match, scanning for transaction {}", hintRow, transactionId)
         val allRows = sheetsClient.readAllRows("Transactions!${txIdCol}:${txIdCol}")
         for ((index, row) in allRows.withIndex()) {
             if (row.firstOrNull()?.toString() == transactionId) {
