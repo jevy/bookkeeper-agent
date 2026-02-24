@@ -10,10 +10,18 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.slf4j.LoggerFactory
 import java.net.InetSocketAddress
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 object Metrics {
     private val logger = LoggerFactory.getLogger(Metrics::class.java)
     val registry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
+
+    private val lastActivityTimestamp = AtomicLong(System.currentTimeMillis())
+    private val healthTimeoutMs = System.getenv("HEALTH_TIMEOUT_MS")?.toLongOrNull() ?: 600_000L
+
+    fun updateActivity() {
+        lastActivityTimestamp.set(System.currentTimeMillis())
+    }
 
     fun startHttpServer(port: Int) {
         val server = HttpServer.create(InetSocketAddress(port), 0)
@@ -23,9 +31,18 @@ object Metrics {
             exchange.sendResponseHeaders(200, response.size.toLong())
             exchange.responseBody.use { it.write(response) }
         }
+        server.createContext("/healthz") { exchange ->
+            val elapsed = System.currentTimeMillis() - lastActivityTimestamp.get()
+            val healthy = elapsed < healthTimeoutMs
+            val status = if (healthy) 200 else 503
+            val body = if (healthy) "ok" else "stale: last activity ${elapsed / 1000}s ago"
+            val response = body.toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(status, response.size.toLong())
+            exchange.responseBody.use { it.write(response) }
+        }
         server.executor = Executors.newSingleThreadExecutor()
         server.start()
-        logger.info("Metrics server started on :{}/metrics", port)
+        logger.info("Metrics server started on :{}/metrics and /healthz (timeout={}ms)", port, healthTimeoutMs)
     }
 
     fun pushToGateway(url: String, job: String) {

@@ -7,3 +7,4 @@ resources:
   - deployment-producer.yaml
   - deployment-categorizer.yaml
   - deployment-writer.yaml
+  - prometheusrule.yaml

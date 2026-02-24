@@ -45,7 +45,7 @@ class CategoryWriter(
         return result
     }
 
-    fun run() {
+    fun run(onActivity: () -> Unit = {}) {
         val consumer = KafkaFactory.createConsumer(config, "category-writer")
         val tombstoneProducer = KafkaFactory.createTombstoneProducer(config)
         val dlqProducer = KafkaFactory.createProducer(config)
@@ -60,6 +60,7 @@ class CategoryWriter(
                     durationTimer.record(Runnable { writeCategory(record.value()) })
                     tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
                     logger.debug("Tombstoned transaction {} from uncategorized", transactionId)
+                    onActivity()
                 } catch (e: Exception) {
                     errorsCounter.increment()
                     logger.error("Error writing category for transaction {}, sending to write-failed DLQ", transactionId, e)

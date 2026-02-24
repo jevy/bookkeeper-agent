@@ -47,7 +47,7 @@ class CategorizerAgent(
         observationConfig().observationHandler(ChatModelMeterObservationHandler(meterRegistry))
     }
 
-    private val chatClient: ChatClient = run {
+    private val chatClient: ChatClient = kotlin.run {
         val api = OpenAiApi.builder()
             .baseUrl("https://openrouter.ai/api")
             .apiKey(config.openrouterApiKey)
@@ -148,7 +148,7 @@ class CategorizerAgent(
         }
     }
 
-    fun run() {
+    fun run(onActivity: () -> Unit = {}) {
         val consumer = KafkaFactory.createConsumer(config, "categorizer-agent")
         val producer = KafkaFactory.createProducer(config)
         val tombstoneProducer = KafkaFactory.createTombstoneProducer(config)
@@ -167,6 +167,7 @@ class CategorizerAgent(
                 try {
                     if (transaction.getCategory() != null) {
                         logger.info("Transaction {} already categorized, skipping", transaction.getTransactionId())
+                        onActivity()
                         continue
                     }
 
@@ -190,6 +191,7 @@ class CategorizerAgent(
                         logger.warn("Could not categorize '{}', sent to DLQ and tombstoned", transaction.getDescription())
                         failedCounter.increment()
                     }
+                    onActivity()
                 } catch (e: Exception) {
                     consecutiveErrors++
                     val backoffMs = min(1000L * (1L shl min(consecutiveErrors - 1, 8)), 300_000L)
@@ -219,7 +221,7 @@ class CategorizerAgent(
             .call()
             .content()
 
-        val result = tools.submitResult ?: run {
+        val result = tools.submitResult ?: kotlin.run {
             logger.warn("Agent did not call submit_category for '{}'", transaction.getDescription())
             return null
         }
