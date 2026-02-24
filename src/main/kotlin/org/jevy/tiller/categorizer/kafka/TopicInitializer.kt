@@ -4,6 +4,7 @@ import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.AdminClientConfig
 import org.apache.kafka.clients.admin.AlterConfigOp
 import org.apache.kafka.clients.admin.ConfigEntry
+import org.apache.kafka.clients.admin.NewPartitions
 import org.apache.kafka.clients.admin.NewTopic
 import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.config.TopicConfig
@@ -15,9 +16,12 @@ private val logger = LoggerFactory.getLogger("org.jevy.tiller.categorizer.kafka.
 
 data class TopicSpec(
     val name: String,
+    val partitions: Int = DEFAULT_PARTITIONS,
     val config: Map<String, String>,
     val deleteConfigs: List<String> = emptyList(),
 )
+
+private const val DEFAULT_PARTITIONS = 3
 
 object TopicInitializer {
 
@@ -66,12 +70,13 @@ object TopicInitializer {
     private fun createOrUpdate(admin: AdminClient, spec: TopicSpec) {
         val created = tryCreate(admin, spec)
         if (!created) {
+            ensurePartitions(admin, spec)
             ensureConfig(admin, spec)
         }
     }
 
     private fun tryCreate(admin: AdminClient, spec: TopicSpec): Boolean {
-        val newTopic = NewTopic(spec.name, 1, 1.toShort()).configs(spec.config)
+        val newTopic = NewTopic(spec.name, spec.partitions, 1.toShort()).configs(spec.config)
         return try {
             admin.createTopics(listOf(newTopic)).all().get()
             logger.info("Created topic {} with config {}", spec.name, spec.config)
@@ -83,6 +88,16 @@ object TopicInitializer {
             } else {
                 throw e
             }
+        }
+    }
+
+    private fun ensurePartitions(admin: AdminClient, spec: TopicSpec) {
+        val description = admin.describeTopics(listOf(spec.name)).allTopicNames().get()[spec.name]
+            ?: return
+        val current = description.partitions().size
+        if (current < spec.partitions) {
+            logger.info("Topic {} partitions: {} -> {}", spec.name, current, spec.partitions)
+            admin.createPartitions(mapOf(spec.name to NewPartitions.increaseTo(spec.partitions))).all().get()
         }
     }
 
