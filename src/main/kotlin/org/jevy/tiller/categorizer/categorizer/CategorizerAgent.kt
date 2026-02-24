@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.observation.ObservationRegistry
+import org.springframework.ai.chat.observation.ChatModelMeterObservationHandler
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.jevy.tiller.categorizer.categorizer.tools.SheetLookupTool
 import org.jevy.tiller.categorizer.categorizer.tools.WebSearchTool
@@ -43,6 +44,7 @@ class CategorizerAgent(
 
     private val observationRegistry = ObservationRegistry.create().apply {
         observationConfig().observationHandler(DefaultMeterObservationHandler(meterRegistry))
+        observationConfig().observationHandler(ChatModelMeterObservationHandler(meterRegistry))
     }
 
     private val chatClient: ChatClient = run {
