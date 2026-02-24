@@ -15,7 +15,6 @@ class AvroSchemaTest {
             .setDescription("COSTCO WHOLESAL")
             .setAmount("-\$384.91")
             .setAccount("Chequing")
-            .setSheetRowNumber(5)
             .build()
 
         assertEquals("txn-001", tx.getTransactionId().toString())
@@ -23,7 +22,6 @@ class AvroSchemaTest {
         assertEquals("COSTCO WHOLESAL", tx.getDescription().toString())
         assertEquals("-\$384.91", tx.getAmount().toString())
         assertEquals("Chequing", tx.getAccount().toString())
-        assertEquals(5, tx.getSheetRowNumber())
     }
 
     @Test
@@ -34,7 +32,6 @@ class AvroSchemaTest {
             .setDescription("Test")
             .setAmount("\$10.00")
             .setAccount("Savings")
-            .setSheetRowNumber(2)
             .build()
 
         assertNull(tx.getCategory())
@@ -58,7 +55,6 @@ class AvroSchemaTest {
             .setCategory("Groceries")
             .setAmount("\$10.00")
             .setAccount("Savings")
-            .setSheetRowNumber(3)
             .build()
 
         assertEquals("Groceries", tx.getCategory().toString())
@@ -72,7 +68,6 @@ class AvroSchemaTest {
             .setDescription("COSTCO")
             .setAmount("-\$50.00")
             .setAccount("Visa")
-            .setSheetRowNumber(10)
             .build()
 
         val categorized = Transaction.newBuilder(original)

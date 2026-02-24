@@ -50,6 +50,15 @@ services:
       redpanda:
         condition: service_healthy
 
+  init:
+    build: .
+    command: ["init"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
   producer:
     build: .
     command: ["producer"]
@@ -63,8 +72,8 @@ services:
     volumes:
       - ./service-account.json:/app/credentials/service-account.json:ro
     depends_on:
-      redpanda:
-        condition: service_healthy
+      init:
+        condition: service_completed_successfully
 
   categorizer:
     build: .
@@ -78,8 +87,8 @@ services:
     volumes:
       - ./service-account.json:/app/credentials/service-account.json:ro
     depends_on:
-      redpanda:
-        condition: service_healthy
+      init:
+        condition: service_completed_successfully
 
   writer:
     build: .
@@ -92,5 +101,5 @@ services:
     volumes:
       - ./service-account.json:/app/credentials/service-account.json:ro
     depends_on:
-      redpanda:
-        condition: service_healthy
+      init:
+        condition: service_completed_successfully

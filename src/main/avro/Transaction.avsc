@@ -19,6 +19,6 @@
     {"name": "note",             "type": ["null", "string"],  "default": null, "doc": "User notes"},
     {"name": "source",           "type": ["null", "string"],  "default": null, "doc": "Data source (e.g., Yodlee)"},
     {"name": "date_added",       "type": ["null", "string"],  "default": null, "doc": "When Tiller imported the transaction"},
-    {"name": "sheet_row_number", "type": "int",               "doc": "Row number in the Google Sheet (for write-back)"}
+    {"name": "owner",            "type": ["null", "string"],  "default": null, "doc": "Google Sheet ID identifying the owner/tenant"}
   ]
 }

@@ -8,6 +8,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerConfig
+import org.apache.kafka.common.serialization.ByteArraySerializer
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.serialization.StringSerializer
 import org.jevy.tiller.categorizer.config.AppConfig
@@ -21,6 +22,16 @@ object KafkaFactory {
             ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG to StringSerializer::class.java.name,
             ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG to KafkaAvroSerializer::class.java.name,
             KafkaAvroSerializerConfig.SCHEMA_REGISTRY_URL_CONFIG to config.schemaRegistryUrl,
+            ProducerConfig.ACKS_CONFIG to "all",
+        )
+        return KafkaProducer(props)
+    }
+
+    fun createTombstoneProducer(config: AppConfig): KafkaProducer<String, ByteArray?> {
+        val props = mapOf(
+            ProducerConfig.BOOTSTRAP_SERVERS_CONFIG to config.kafkaBootstrapServers,
+            ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG to StringSerializer::class.java.name,
+            ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG to ByteArraySerializer::class.java.name,
             ProducerConfig.ACKS_CONFIG to "all",
         )
         return KafkaProducer(props)

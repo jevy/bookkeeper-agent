@@ -16,6 +16,7 @@ private val logger = LoggerFactory.getLogger("org.jevy.tiller.categorizer.kafka.
 data class TopicSpec(
     val name: String,
     val config: Map<String, String>,
+    val deleteConfigs: List<String> = emptyList(),
 )
 
 object TopicInitializer {
@@ -24,9 +25,10 @@ object TopicInitializer {
         TopicSpec(
             name = TopicNames.UNCATEGORIZED,
             config = mapOf(
-                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_DELETE,
-                TopicConfig.RETENTION_MS_CONFIG to "604800000", // 7 days
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.DELETE_RETENTION_MS_CONFIG to "86400000", // tombstones retained 24h
             ),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
         ),
         TopicSpec(
             name = TopicNames.CATEGORIZED,
@@ -36,7 +38,14 @@ object TopicInitializer {
             name = TopicNames.CATEGORIZATION_FAILED,
             config = mapOf(
                 TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_DELETE,
-                TopicConfig.RETENTION_MS_CONFIG to "604800000", // 7 days
+                TopicConfig.RETENTION_MS_CONFIG to "${30 * 24 * 60 * 60 * 1000L}", // 30 days
+            ),
+        ),
+        TopicSpec(
+            name = TopicNames.WRITE_FAILED,
+            config = mapOf(
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_DELETE,
+                TopicConfig.RETENTION_MS_CONFIG to "${30 * 24 * 60 * 60 * 1000L}", // 30 days
             ),
         ),
     )
@@ -82,7 +91,7 @@ object TopicInitializer {
         val currentConfig = admin.describeConfigs(listOf(resource)).all().get()[resource]
             ?: return
 
-        val ops = spec.config.mapNotNull { (key, desired) ->
+        val setOps = spec.config.mapNotNull { (key, desired) ->
             val current = currentConfig.get(key)?.value()
             if (current != desired) {
                 logger.info("Topic {} config {}: {} -> {}", spec.name, key, current, desired)
@@ -92,6 +101,17 @@ object TopicInitializer {
             }
         }
 
+        val deleteOps = spec.deleteConfigs.mapNotNull { key ->
+            val entry = currentConfig.get(key)
+            if (entry != null && entry.source() != ConfigEntry.ConfigSource.DEFAULT_CONFIG) {
+                logger.info("Topic {} config {}: deleting (reset to default)", spec.name, key)
+                AlterConfigOp(ConfigEntry(key, ""), AlterConfigOp.OpType.DELETE)
+            } else {
+                null
+            }
+        }
+
+        val ops = setOps + deleteOps
         if (ops.isNotEmpty()) {
             admin.incrementalAlterConfigs(mapOf(resource to ops)).all().get()
             logger.info("Updated config for topic {}", spec.name)

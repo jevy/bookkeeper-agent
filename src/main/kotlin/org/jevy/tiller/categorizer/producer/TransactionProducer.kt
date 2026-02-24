@@ -48,7 +48,7 @@ class TransactionProducer(
         for ((index, row) in rows.drop(1).withIndex()) {
             val rowNumber = index + 2 // 1-indexed, skip header
             try {
-                val transaction = rowToTransaction(row, rowNumber, colIndex, config.maxTransactionAgeDays)
+                val transaction = rowToTransaction(row, colIndex, config.maxTransactionAgeDays, config.googleSheetId)
                 if (transaction == null) {
                     skipped++
                     continue
@@ -85,7 +85,7 @@ class TransactionProducer(
     }
 
     companion object {
-        internal fun rowToTransaction(row: List<Any>, rowNumber: Int, colIndex: Map<String, Int>, maxAgeDays: Long = 365): Transaction? {
+        internal fun rowToTransaction(row: List<Any>, colIndex: Map<String, Int>, maxAgeDays: Long = 365, owner: String? = null): Transaction? {
             fun col(name: String): String? = colIndex[name]?.let { row.getOrNull(it)?.toString() }
 
             val category = col("Category") ?: ""
@@ -121,7 +121,7 @@ class TransactionProducer(
                 .setNote(col("Note"))
                 .setSource(col("Source"))
                 .setDateAdded(col("Date Added"))
-                .setSheetRowNumber(rowNumber)
+                .setOwner(owner)
                 .build()
         }
     }

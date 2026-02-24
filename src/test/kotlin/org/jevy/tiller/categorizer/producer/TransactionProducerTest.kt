@@ -44,7 +44,7 @@ class TransactionProducerTest {
     @Test
     fun `rowToTransaction maps uncategorized row correctly`() {
         val row = makeRow()
-        val tx = TransactionProducer.rowToTransaction(row, 5, colIndex)
+        val tx = TransactionProducer.rowToTransaction(row, colIndex)
 
         assertNotNull(tx)
         assertEquals("txn-12345", tx.getTransactionId().toString())
@@ -57,13 +57,12 @@ class TransactionProducerTest {
         assertEquals("TD Bank", tx.getInstitution().toString())
         assertEquals("COSTCO WHOLESALE #1234", tx.getFullDescription().toString())
         assertEquals("Yodlee", tx.getSource().toString())
-        assertEquals(5, tx.getSheetRowNumber())
     }
 
     @Test
     fun `rowToTransaction returns null for already-categorized row`() {
         val row = makeRow(category = "Groceries")
-        val tx = TransactionProducer.rowToTransaction(row, 5, colIndex)
+        val tx = TransactionProducer.rowToTransaction(row, colIndex)
 
         assertNull(tx)
     }
@@ -71,7 +70,7 @@ class TransactionProducerTest {
     @Test
     fun `rowToTransaction returns null when transaction ID is missing`() {
         val row = makeRow(transactionId = "")
-        val tx = TransactionProducer.rowToTransaction(row, 5, colIndex)
+        val tx = TransactionProducer.rowToTransaction(row, colIndex)
 
         assertNull(tx)
     }
@@ -81,7 +80,7 @@ class TransactionProducerTest {
         val fmt = DateTimeFormatter.ofPattern("M/d/yyyy")
         val oldDate = LocalDate.now().minusDays(400).format(fmt)
         val row = makeRow(date = oldDate)
-        val tx = TransactionProducer.rowToTransaction(row, 5, colIndex, maxAgeDays = 365)
+        val tx = TransactionProducer.rowToTransaction(row, colIndex, maxAgeDays = 365)
 
         assertNull(tx)
     }
@@ -91,7 +90,7 @@ class TransactionProducerTest {
         val fmt = DateTimeFormatter.ofPattern("M/d/yyyy")
         val recentDate = LocalDate.now().minusDays(30).format(fmt)
         val row = makeRow(date = recentDate)
-        val tx = TransactionProducer.rowToTransaction(row, 5, colIndex, maxAgeDays = 365)
+        val tx = TransactionProducer.rowToTransaction(row, colIndex, maxAgeDays = 365)
 
         assertNotNull(tx)
     }
@@ -99,7 +98,7 @@ class TransactionProducerTest {
     @Test
     fun `rowToTransaction handles short rows gracefully`() {
         val row = listOf<Any>("2/15/2026", "COSTCO", "", "-\$50", "Visa", "", "", "", "", "txn-short")
-        val tx = TransactionProducer.rowToTransaction(row, 3, colIndex)
+        val tx = TransactionProducer.rowToTransaction(row, colIndex)
 
         assertNotNull(tx)
         assertEquals("txn-short", tx.getTransactionId().toString())

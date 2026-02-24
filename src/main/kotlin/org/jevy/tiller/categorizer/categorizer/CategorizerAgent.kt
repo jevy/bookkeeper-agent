@@ -149,6 +149,7 @@ class CategorizerAgent(
     fun run() {
         val consumer = KafkaFactory.createConsumer(config, "categorizer-agent")
         val producer = KafkaFactory.createProducer(config)
+        val tombstoneProducer = KafkaFactory.createTombstoneProducer(config)
 
         consumer.subscribe(listOf(TopicNames.UNCATEGORIZED))
         logger.info("Subscribed to {}", TopicNames.UNCATEGORIZED)
@@ -158,8 +159,10 @@ class CategorizerAgent(
         while (true) {
             val records = consumer.poll(Duration.ofSeconds(5))
             for (record in records) {
+                // Skip tombstones (produced after successful writes or DLQ routing)
+                val transaction = record.value() ?: continue
+
                 try {
-                    val transaction = record.value()
                     if (transaction.getCategory() != null) {
                         logger.info("Transaction {} already categorized, skipping", transaction.getTransactionId())
                         continue
@@ -179,8 +182,10 @@ class CategorizerAgent(
                         if (result!!.category.equals("Unknown", ignoreCase = true)) unknownCounter.increment()
                         else categorizedCounter.increment()
                     } else {
-                        producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transaction.getTransactionId().toString(), transaction))
-                        logger.warn("Could not categorize '{}'", transaction.getDescription())
+                        val transactionId = transaction.getTransactionId().toString()
+                        producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transactionId, transaction))
+                        tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
+                        logger.warn("Could not categorize '{}', sent to DLQ and tombstoned", transaction.getDescription())
                         failedCounter.increment()
                     }
                 } catch (e: Exception) {

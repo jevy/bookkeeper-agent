@@ -71,7 +71,6 @@ class CategoryWriterTest {
             .setCategory("Groceries")
             .setAmount("\$10")
             .setAccount("Visa")
-            .setSheetRowNumber(5)
             .build()
 
         every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(
@@ -95,7 +94,6 @@ class CategoryWriterTest {
             .setCategory("Groceries")
             .setAmount("\$10")
             .setAccount("Visa")
-            .setSheetRowNumber(5)
             .build()
 
         every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(

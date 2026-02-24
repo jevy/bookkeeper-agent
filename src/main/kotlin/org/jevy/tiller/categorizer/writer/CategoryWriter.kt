@@ -2,6 +2,7 @@ package org.jevy.tiller.categorizer.writer
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import org.apache.kafka.clients.producer.ProducerRecord
 import org.jevy.tiller.categorizer.config.AppConfig
 import org.jevy.tiller.categorizer.kafka.KafkaFactory
 import org.jevy.tiller.categorizer.kafka.TopicNames
@@ -46,17 +47,23 @@ class CategoryWriter(
 
     fun run() {
         val consumer = KafkaFactory.createConsumer(config, "category-writer")
+        val tombstoneProducer = KafkaFactory.createTombstoneProducer(config)
+        val dlqProducer = KafkaFactory.createProducer(config)
         consumer.subscribe(listOf(TopicNames.CATEGORIZED))
         logger.info("Subscribed to {}", TopicNames.CATEGORIZED)
 
         while (true) {
             val records = consumer.poll(Duration.ofSeconds(5))
             for (record in records) {
+                val transactionId = record.key()
                 try {
                     durationTimer.record(Runnable { writeCategory(record.value()) })
+                    tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
+                    logger.debug("Tombstoned transaction {} from uncategorized", transactionId)
                 } catch (e: Exception) {
                     errorsCounter.increment()
-                    logger.error("Error writing category for transaction {}", record.key(), e)
+                    logger.error("Error writing category for transaction {}, sending to write-failed DLQ", transactionId, e)
+                    dlqProducer.send(ProducerRecord(TopicNames.WRITE_FAILED, transactionId, record.value()))
                 }
             }
             consumer.commitSync()
