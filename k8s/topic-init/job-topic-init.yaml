@@ -17,7 +17,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: topic-init
-          image: ghcr.io/jevy/tiller-categorizer-agent:0.7.0
+          image: ghcr.io/jevy/tiller-categorizer-agent:0.9.0
           args: ["init"]
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS

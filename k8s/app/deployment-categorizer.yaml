@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: categorizer
-          image: ghcr.io/jevy/tiller-categorizer-agent:0.7.0
+          image: ghcr.io/jevy/tiller-categorizer-agent:0.9.0
           args: ["categorizer"]
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
