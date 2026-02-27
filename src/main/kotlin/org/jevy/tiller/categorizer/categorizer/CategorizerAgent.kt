@@ -24,12 +24,16 @@ import org.springframework.ai.tool.annotation.ToolParam
 import org.springframework.ai.model.tool.ToolCallingManager
 import org.springframework.retry.support.RetryTemplate
 import java.time.Duration
-import kotlin.math.min
 
 class CategorizerAgent(
     private val config: AppConfig,
     private val meterRegistry: MeterRegistry = SimpleMeterRegistry(),
 ) {
+
+    companion object {
+        internal const val MAX_RETRIES = 3
+        internal const val RETRY_BASE_MS = 1000L
+    }
 
     private val logger = LoggerFactory.getLogger(CategorizerAgent::class.java)
     private val sheetsClient = SheetsClient(config)
@@ -167,37 +171,47 @@ class CategorizerAgent(
                     // Skip tombstones (produced after successful writes or DLQ routing)
                     val transaction = record.value() ?: continue
 
-                    try {
-                        if (transaction.getCategory() != null) {
-                            logger.info("Transaction {} already categorized, skipping", transaction.getTransactionId())
-                            continue
-                        }
+                    if (transaction.getCategory() != null) {
+                        logger.info("Transaction {} already categorized, skipping", transaction.getTransactionId())
+                        continue
+                    }
 
-                        var result: CategorizationResult? = null
-                        durationTimer.record(Runnable { result = categorize(transaction) })
-                        consecutiveErrors = 0
-
-                        if (result != null) {
-                            val categorized = Transaction.newBuilder(transaction)
-                                .setCategory(result!!.category)
-                                .setCategoryJustification(result!!.justification)
-                                .build()
-                            producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
-                            logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result!!.category, result!!.justification)
-                            if (result!!.category.equals("Unknown", ignoreCase = true)) unknownCounter.increment()
-                            else categorizedCounter.increment()
-                        } else {
-                            val transactionId = transaction.getTransactionId().toString()
-                            producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transactionId, transaction))
-                            tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
-                            logger.warn("Could not categorize '{}', sent to DLQ and tombstoned", transaction.getDescription())
-                            failedCounter.increment()
+                    var result: CategorizationResult? = null
+                    var succeeded = false
+                    for (attempt in 1..MAX_RETRIES) {
+                        try {
+                            durationTimer.record(Runnable { result = categorize(transaction) })
+                            consecutiveErrors = 0
+                            succeeded = true
+                            break
+                        } catch (e: Exception) {
+                            consecutiveErrors++
+                            if (attempt < MAX_RETRIES) {
+                                val backoffMs = RETRY_BASE_MS * (1L shl (attempt - 1))
+                                logger.warn("Categorization attempt {}/{} failed for '{}', retrying in {}ms", attempt, MAX_RETRIES, transaction.getDescription(), backoffMs, e)
+                                Thread.sleep(backoffMs)
+                            } else {
+                                logger.error("Categorization failed after {} attempts for '{}'", MAX_RETRIES, transaction.getDescription(), e)
+                            }
                         }
-                    } catch (e: Exception) {
-                        consecutiveErrors++
-                        val backoffMs = min(1000L * (1L shl min(consecutiveErrors - 1, 8)), 300_000L)
-                        logger.error("Error categorizing transaction (consecutive errors: {}, backing off {}s)", consecutiveErrors, backoffMs / 1000, e)
-                        Thread.sleep(backoffMs)
+                    }
+
+                    if (succeeded && result != null) {
+                        val categorized = Transaction.newBuilder(transaction)
+                            .setCategory(result!!.category)
+                            .setCategoryJustification(result!!.justification)
+                            .build()
+                        producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
+                        logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result!!.category, result!!.justification)
+                        if (result!!.category.equals("Unknown", ignoreCase = true)) unknownCounter.increment()
+                        else categorizedCounter.increment()
+                    } else {
+                        val transactionId = transaction.getTransactionId().toString()
+                        producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transactionId, transaction))
+                        tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
+                        if (!succeeded) logger.warn("Exhausted retries for '{}', sent to DLQ and tombstoned", transaction.getDescription())
+                        else logger.warn("Could not categorize '{}', sent to DLQ and tombstoned", transaction.getDescription())
+                        failedCounter.increment()
                     }
                 }
                 consumer.commitSync()
