@@ -15,6 +15,7 @@ import org.jevy.tiller.categorizer.kafka.TopicNames
 import org.jevy.tiller.categorizer.sheets.SheetsClient
 import org.jevy.tiller_categorizer_agent.Transaction
 import org.slf4j.LoggerFactory
+import org.jevy.tiller.categorizer.metrics.OpenRouterMetricsInterceptor
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.openai.OpenAiChatModel
 import org.springframework.ai.openai.OpenAiChatOptions
@@ -23,6 +24,7 @@ import org.springframework.ai.tool.annotation.Tool
 import org.springframework.ai.tool.annotation.ToolParam
 import org.springframework.ai.model.tool.ToolCallingManager
 import org.springframework.retry.support.RetryTemplate
+import org.springframework.web.client.RestClient
 import java.time.Duration
 
 class CategorizerAgent(
@@ -52,9 +54,11 @@ class CategorizerAgent(
     }
 
     private val chatClient: ChatClient = kotlin.run {
+        val interceptor = OpenRouterMetricsInterceptor(meterRegistry)
         val api = OpenAiApi.builder()
             .baseUrl("https://openrouter.ai/api")
             .apiKey(config.openrouterApiKey)
+            .restClientBuilder(RestClient.builder().requestInterceptor(interceptor))
             .build()
         val chatModel = OpenAiChatModel(
             api,
