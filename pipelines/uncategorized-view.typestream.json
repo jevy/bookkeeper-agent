@@ -1,0 +1,26 @@
+{
+  "name": "tiller-uncategorized-view",
+  "version": "1",
+  "description": "Materializes transactions.uncategorized as a KTable for accurate pending count",
+  "graph": {
+    "nodes": [
+      {
+        "id": "source",
+        "kafkaSource": {
+          "topicPath": "/dev/kafka/local/topics/transactions.uncategorized",
+          "encoding": "AVRO"
+        }
+      },
+      {
+        "id": "view",
+        "materializedView": {
+          "groupByField": "",
+          "aggregationType": "latest"
+        }
+      }
+    ],
+    "edges": [
+      { "fromId": "source", "toId": "view" }
+    ]
+  }
+}
