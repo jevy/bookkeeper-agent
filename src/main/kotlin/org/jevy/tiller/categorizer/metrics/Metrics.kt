@@ -10,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.slf4j.LoggerFactory
 import java.net.InetSocketAddress
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 object Metrics {
@@ -18,9 +19,15 @@ object Metrics {
 
     private val lastActivityTimestamp = AtomicLong(System.currentTimeMillis())
     private val healthTimeoutMs = System.getenv("HEALTH_TIMEOUT_MS")?.toLongOrNull() ?: 600_000L
+    private val consumerAlive = AtomicBoolean(false)
 
     fun updateActivity() {
         lastActivityTimestamp.set(System.currentTimeMillis())
+    }
+
+    fun setConsumerAlive(alive: Boolean) {
+        consumerAlive.set(alive)
+        if (alive) updateActivity()
     }
 
     fun startHttpServer(port: Int) {
@@ -32,10 +39,16 @@ object Metrics {
             exchange.responseBody.use { it.write(response) }
         }
         server.createContext("/healthz") { exchange ->
+            val alive = consumerAlive.get()
             val elapsed = System.currentTimeMillis() - lastActivityTimestamp.get()
-            val healthy = elapsed < healthTimeoutMs
+            val activityOk = elapsed < healthTimeoutMs
+            val healthy = alive && activityOk
             val status = if (healthy) 200 else 503
-            val body = if (healthy) "ok" else "stale: last activity ${elapsed / 1000}s ago"
+            val body = when {
+                !alive -> "dead: consumer loop not running"
+                !activityOk -> "stale: last activity ${elapsed / 1000}s ago"
+                else -> "ok"
+            }
             val response = body.toByteArray(Charsets.UTF_8)
             exchange.sendResponseHeaders(status, response.size.toLong())
             exchange.responseBody.use { it.write(response) }

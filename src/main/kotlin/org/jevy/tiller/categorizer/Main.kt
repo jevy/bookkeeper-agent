@@ -34,13 +34,19 @@ fun main(args: Array<String>) {
             val config = AppConfig.fromEnv()
             Metrics.startHttpServer(config.metricsPort)
             logger.info("Starting Categorizer Agent")
-            CategorizerAgent(config, Metrics.registry).run(Metrics::updateActivity)
+            CategorizerAgent(config, Metrics.registry).run(
+                onActivity = Metrics::updateActivity,
+                onAlive = Metrics::setConsumerAlive,
+            )
         }
         "writer" -> {
             val config = AppConfig.fromEnv()
             Metrics.startHttpServer(config.metricsPort)
             logger.info("Starting Category Writer")
-            CategoryWriter(config, meterRegistry = Metrics.registry).run(Metrics::updateActivity)
+            CategoryWriter(config, meterRegistry = Metrics.registry).run(
+                onActivity = Metrics::updateActivity,
+                onAlive = Metrics::setConsumerAlive,
+            )
         }
         else -> {
             System.err.println("Unknown command: $command")

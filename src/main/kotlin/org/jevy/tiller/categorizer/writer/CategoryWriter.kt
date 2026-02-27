@@ -45,29 +45,36 @@ class CategoryWriter(
         return result
     }
 
-    fun run(onActivity: () -> Unit = {}) {
+    fun run(onActivity: () -> Unit = {}, onAlive: (Boolean) -> Unit = {}) {
         val consumer = KafkaFactory.createConsumer(config, "category-writer")
         val tombstoneProducer = KafkaFactory.createTombstoneProducer(config)
         val dlqProducer = KafkaFactory.createProducer(config)
         consumer.subscribe(listOf(TopicNames.CATEGORIZED))
         logger.info("Subscribed to {}", TopicNames.CATEGORIZED)
 
-        while (true) {
-            val records = consumer.poll(Duration.ofSeconds(5))
-            for (record in records) {
-                val transactionId = record.key()
-                try {
-                    durationTimer.record(Runnable { writeCategory(record.value()) })
-                    tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
-                    logger.debug("Tombstoned transaction {} from uncategorized", transactionId)
-                    onActivity()
-                } catch (e: Exception) {
-                    errorsCounter.increment()
-                    logger.error("Error writing category for transaction {}, sending to write-failed DLQ", transactionId, e)
-                    dlqProducer.send(ProducerRecord(TopicNames.WRITE_FAILED, transactionId, record.value()))
+        onAlive(true)
+
+        try {
+            while (true) {
+                val records = consumer.poll(Duration.ofSeconds(5))
+                onActivity()
+                for (record in records) {
+                    val transactionId = record.key()
+                    try {
+                        durationTimer.record(Runnable { writeCategory(record.value()) })
+                        tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
+                        logger.debug("Tombstoned transaction {} from uncategorized", transactionId)
+                    } catch (e: Exception) {
+                        errorsCounter.increment()
+                        logger.error("Error writing category for transaction {}, sending to write-failed DLQ", transactionId, e)
+                        dlqProducer.send(ProducerRecord(TopicNames.WRITE_FAILED, transactionId, record.value()))
+                    }
                 }
+                consumer.commitSync()
             }
-            consumer.commitSync()
+        } finally {
+            onAlive(false)
+            logger.error("Consumer loop exited — marking unhealthy")
         }
     }
 

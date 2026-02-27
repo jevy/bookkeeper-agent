@@ -148,7 +148,7 @@ class CategorizerAgent(
         }
     }
 
-    fun run(onActivity: () -> Unit = {}) {
+    fun run(onActivity: () -> Unit = {}, onAlive: (Boolean) -> Unit = {}) {
         val consumer = KafkaFactory.createConsumer(config, "categorizer-agent")
         val producer = KafkaFactory.createProducer(config)
         val tombstoneProducer = KafkaFactory.createTombstoneProducer(config)
@@ -156,50 +156,55 @@ class CategorizerAgent(
         consumer.subscribe(listOf(TopicNames.UNCATEGORIZED))
         logger.info("Subscribed to {}", TopicNames.UNCATEGORIZED)
 
+        onAlive(true)
         var consecutiveErrors = 0
 
-        while (true) {
-            val records = consumer.poll(Duration.ofSeconds(5))
-            for (record in records) {
-                // Skip tombstones (produced after successful writes or DLQ routing)
-                val transaction = record.value() ?: continue
+        try {
+            while (true) {
+                val records = consumer.poll(Duration.ofSeconds(5))
+                onActivity()
+                for (record in records) {
+                    // Skip tombstones (produced after successful writes or DLQ routing)
+                    val transaction = record.value() ?: continue
 
-                try {
-                    if (transaction.getCategory() != null) {
-                        logger.info("Transaction {} already categorized, skipping", transaction.getTransactionId())
-                        onActivity()
-                        continue
+                    try {
+                        if (transaction.getCategory() != null) {
+                            logger.info("Transaction {} already categorized, skipping", transaction.getTransactionId())
+                            continue
+                        }
+
+                        var result: CategorizationResult? = null
+                        durationTimer.record(Runnable { result = categorize(transaction) })
+                        consecutiveErrors = 0
+
+                        if (result != null) {
+                            val categorized = Transaction.newBuilder(transaction)
+                                .setCategory(result!!.category)
+                                .setCategoryJustification(result!!.justification)
+                                .build()
+                            producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
+                            logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result!!.category, result!!.justification)
+                            if (result!!.category.equals("Unknown", ignoreCase = true)) unknownCounter.increment()
+                            else categorizedCounter.increment()
+                        } else {
+                            val transactionId = transaction.getTransactionId().toString()
+                            producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transactionId, transaction))
+                            tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
+                            logger.warn("Could not categorize '{}', sent to DLQ and tombstoned", transaction.getDescription())
+                            failedCounter.increment()
+                        }
+                    } catch (e: Exception) {
+                        consecutiveErrors++
+                        val backoffMs = min(1000L * (1L shl min(consecutiveErrors - 1, 8)), 300_000L)
+                        logger.error("Error categorizing transaction (consecutive errors: {}, backing off {}s)", consecutiveErrors, backoffMs / 1000, e)
+                        Thread.sleep(backoffMs)
                     }
-
-                    var result: CategorizationResult? = null
-                    durationTimer.record(Runnable { result = categorize(transaction) })
-                    consecutiveErrors = 0
-
-                    if (result != null) {
-                        val categorized = Transaction.newBuilder(transaction)
-                            .setCategory(result!!.category)
-                            .setCategoryJustification(result!!.justification)
-                            .build()
-                        producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
-                        logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result!!.category, result!!.justification)
-                        if (result!!.category.equals("Unknown", ignoreCase = true)) unknownCounter.increment()
-                        else categorizedCounter.increment()
-                    } else {
-                        val transactionId = transaction.getTransactionId().toString()
-                        producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transactionId, transaction))
-                        tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
-                        logger.warn("Could not categorize '{}', sent to DLQ and tombstoned", transaction.getDescription())
-                        failedCounter.increment()
-                    }
-                    onActivity()
-                } catch (e: Exception) {
-                    consecutiveErrors++
-                    val backoffMs = min(1000L * (1L shl min(consecutiveErrors - 1, 8)), 300_000L)
-                    logger.error("Error categorizing transaction (consecutive errors: {}, backing off {}s)", consecutiveErrors, backoffMs / 1000, e)
-                    Thread.sleep(backoffMs)
                 }
+                consumer.commitSync()
             }
-            consumer.commitSync()
+        } finally {
+            onAlive(false)
+            logger.error("Consumer loop exited — marking unhealthy")
         }
     }
 
