@@ -1,5 +1,6 @@
-package org.jevy.bookkeeper.producer
+package org.jevy.bookkeeper
 
+import org.jevy.bookkeeper_agent.Transaction
 import java.security.MessageDigest
 
 object DurableTransactionId {
@@ -18,6 +19,14 @@ object DurableTransactionId {
         val hex = hash.joinToString("") { "%02x".format(it) }
         return "durable-${hex.take(16)}"
     }
+
+    fun generate(transaction: Transaction): String = generate(
+        owner = transaction.getOwner()?.toString() ?: "",
+        date = transaction.getDate()?.toString() ?: "",
+        description = transaction.getDescription()?.toString() ?: "",
+        amount = transaction.getAmount()?.toString() ?: "",
+        account = transaction.getAccount()?.toString() ?: "",
+    )
 
     private fun normalizeAmount(amount: String): String =
         amount.trim().lowercase().replace("$", "").replace(",", "").replace(" ", "")

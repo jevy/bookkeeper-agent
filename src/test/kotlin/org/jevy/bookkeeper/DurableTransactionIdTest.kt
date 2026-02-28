@@ -1,5 +1,6 @@
-package org.jevy.bookkeeper.producer
+package org.jevy.bookkeeper
 
+import org.jevy.bookkeeper_agent.Transaction
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -141,5 +142,38 @@ class DurableTransactionIdTest {
             account = "Visa - 9472",
         )
         assertEquals(id, id2)
+    }
+
+    @Test
+    fun `generate from Transaction matches generate from fields`() {
+        val tx = Transaction.newBuilder()
+            .setTransactionId("ignored")
+            .setDate("2/26/2026")
+            .setDescription("Shoppers Drug M")
+            .setAmount("-$3.00")
+            .setAccount("TD - Personal Chequing")
+            .setOwner(owner)
+            .build()
+
+        val fromFields = DurableTransactionId.generate(owner, "2/26/2026", "Shoppers Drug M", "-$3.00", "TD - Personal Chequing")
+        val fromTx = DurableTransactionId.generate(tx)
+
+        assertEquals(fromFields, fromTx)
+    }
+
+    @Test
+    fun `generate from Transaction with null owner uses empty string`() {
+        val tx = Transaction.newBuilder()
+            .setTransactionId("ignored")
+            .setDate("2/26/2026")
+            .setDescription("Test")
+            .setAmount("-$3.00")
+            .setAccount("Acct")
+            .build()
+
+        val fromFields = DurableTransactionId.generate("", "2/26/2026", "Test", "-$3.00", "Acct")
+        val fromTx = DurableTransactionId.generate(tx)
+
+        assertEquals(fromFields, fromTx)
     }
 }

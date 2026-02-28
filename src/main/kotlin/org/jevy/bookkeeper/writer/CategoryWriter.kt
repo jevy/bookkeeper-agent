@@ -3,6 +3,7 @@ package org.jevy.bookkeeper.writer
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.jevy.bookkeeper.DurableTransactionId
 import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
@@ -73,8 +74,9 @@ class CategoryWriter(
                         tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
                     } catch (e: Exception) {
                         errorsCounter.increment()
-                        logger.error("Error writing category for transaction {}, sending to write-failed DLQ", transactionId, e)
+                        logger.error("Error writing category for transaction {}, sending to write-failed DLQ and tombstoning", transactionId, e)
                         dlqProducer.send(ProducerRecord(TopicNames.WRITE_FAILED, transactionId, record.value()))
+                        tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
                     }
                 }
                 consumer.commitSync()
@@ -93,7 +95,7 @@ class CategoryWriter(
         }
 
         val transactionId = transaction.getTransactionId().toString()
-        val rowNumber = findRow(transactionId)
+        val rowNumber = findRow(transaction)
 
         if (rowNumber == null) {
             skippedCounter.increment()
@@ -119,14 +121,51 @@ class CategoryWriter(
         writtenCounter.increment()
     }
 
-    internal fun findRow(transactionId: String): Int? {
-        val txIdCol = columnLetters["Transaction ID"] ?: "J"
-        val allRows = sheetsClient.readAllRows("Transactions!${txIdCol}:${txIdCol}")
-        for ((index, row) in allRows.withIndex()) {
-            if (row.firstOrNull()?.toString() == transactionId) {
-                return index + 1 // 1-indexed
+    internal fun findRow(transaction: Transaction): Int? {
+        val transactionId = transaction.getTransactionId().toString()
+        val isDurable = transactionId.startsWith("durable-")
+
+        // Tier 1: scan the Transaction ID column (efficient single-column read)
+        if (!isDurable) {
+            val txIdCol = columnLetters["Transaction ID"] ?: "J"
+            val allRows = sheetsClient.readAllRows("Transactions!${txIdCol}:${txIdCol}")
+            for ((index, row) in allRows.withIndex()) {
+                if (row.firstOrNull()?.toString() == transactionId) {
+                    return index + 1 // 1-indexed
+                }
             }
         }
+
+        // Tier 2: content-based matching using durable ID
+        val dateCol = columnLetters["Date"] ?: "A"
+        val descCol = columnLetters["Description"] ?: "B"
+        val amountCol = columnLetters["Amount"] ?: "D"
+        val accountCol = columnLetters["Account"] ?: "E"
+        // Read a range spanning all needed columns in a single API call
+        val rangeStart = minOf(dateCol, descCol, amountCol, accountCol)
+        val rangeEnd = maxOf(dateCol, descCol, amountCol, accountCol)
+        val allRows = sheetsClient.readAllRows("Transactions!${rangeStart}:${rangeEnd}")
+        if (allRows.isEmpty()) return null
+
+        // Build column index from the range we read
+        val headerRow = allRows.first().map { it.toString() }
+        val colIndex = headerRow.withIndex().associate { (i, name) -> name to i }
+
+        val expectedDurableId = DurableTransactionId.generate(transaction)
+
+        for ((index, row) in allRows.drop(1).withIndex()) {
+            val rowDate = colIndex["Date"]?.let { row.getOrNull(it)?.toString() } ?: ""
+            val rowDesc = colIndex["Description"]?.let { row.getOrNull(it)?.toString() } ?: ""
+            val rowAmount = colIndex["Amount"]?.let { row.getOrNull(it)?.toString() } ?: ""
+            val rowAccount = colIndex["Account"]?.let { row.getOrNull(it)?.toString() } ?: ""
+            val owner = transaction.getOwner()?.toString() ?: ""
+
+            val rowDurableId = DurableTransactionId.generate(owner, rowDate, rowDesc, rowAmount, rowAccount)
+            if (rowDurableId == expectedDurableId) {
+                return index + 2 // 1-indexed, skip header
+            }
+        }
+
         return null
     }
 }
