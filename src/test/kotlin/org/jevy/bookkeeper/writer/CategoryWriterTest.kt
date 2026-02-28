@@ -9,6 +9,7 @@ import org.apache.kafka.common.TopicPartition
 import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
+import org.jevy.bookkeeper.sheets.SheetTransaction
 import org.jevy.bookkeeper.sheets.SheetsClient
 import org.jevy.bookkeeper_agent.Transaction
 import org.junit.jupiter.api.AfterEach
@@ -49,46 +50,102 @@ class CategoryWriterTest {
     }
     private val writer = CategoryWriter(config, sheetsClient)
 
+    private fun makeTx(
+        transactionId: String = "txn-100",
+        date: String = "1/1/2026",
+        description: String = "Test",
+        category: String? = null,
+        amount: String = "\$10",
+        account: String = "Visa",
+        owner: String? = null,
+    ): Transaction = Transaction.newBuilder()
+        .setTransactionId(transactionId)
+        .setDate(date)
+        .setDescription(description)
+        .setCategory(category)
+        .setAmount(amount)
+        .setAccount(account)
+        .setOwner(owner)
+        .build()
+
+    private fun makeSheetRow(
+        date: String = "1/1/2026",
+        description: String = "Test",
+        category: String = "",
+        amount: String = "\$10",
+        account: String = "Visa",
+        accountNumber: String = "",
+        institution: String = "",
+        month: String = "",
+        week: String = "",
+        transactionId: String = "txn-100",
+        checkNumber: String = "",
+        fullDescription: String = "",
+        note: String = "",
+        receipt: String = "",
+        source: String = "",
+        categorizedDate: String = "",
+        dateAdded: String = "",
+    ): List<Any> = listOf(
+        date, description, category, amount, account, accountNumber,
+        institution, month, week, transactionId, checkNumber,
+        fullDescription, note, receipt, source, categorizedDate, dateAdded,
+    )
+
+    // --- findRow tests (pure, no SheetsClient mocking) ---
+
     @Test
-    fun `findRow returns correct row by scanning`() {
-        every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(
-            listOf("Transaction ID" as Any), // header (row 1)
-            listOf("txn-100" as Any),        // row 2
-            listOf("txn-200" as Any),        // row 3
-            listOf("txn-300" as Any),        // row 4
+    fun `findRow matches by Transaction ID`() {
+        val rows = listOf(
+            SheetTransaction(2, makeTx("txn-100")),
+            SheetTransaction(3, makeTx("txn-200")),
         )
-
-        val row = writer.findRow("txn-300")
-
-        assertEquals(4, row)
+        assertEquals(3, writer.findRow(makeTx("txn-200"), rows))
     }
 
     @Test
     fun `findRow returns null when transaction not found`() {
-        every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(
-            listOf("Transaction ID" as Any),
-            listOf("txn-100" as Any),
+        val rows = listOf(
+            SheetTransaction(2, makeTx("txn-100", description = "Existing row")),
         )
-
-        val row = writer.findRow("txn-missing")
-
-        assertNull(row)
+        assertNull(writer.findRow(makeTx("txn-missing", description = "Different content"), rows))
     }
 
     @Test
-    fun `writeCategory throws RowNotFoundException when row not found`() {
-        val tx = Transaction.newBuilder()
-            .setTransactionId("txn-missing")
-            .setDate("1/1/2026")
-            .setDescription("Test")
-            .setCategory("Groceries")
-            .setAmount("\$10")
-            .setAccount("Visa")
-            .build()
+    fun `findRow matches durable ID by content`() {
+        val rows = listOf(
+            SheetTransaction(2, makeTx("other-id", date = "1/1/2026", description = "Other")),
+            SheetTransaction(3, makeTx("durable-x", date = "2/15/2026", description = "COSTCO",
+                amount = "-\$384.91", account = "Chequing", owner = "test")),
+        )
+        val target = makeTx("durable-y", date = "2/15/2026", description = "COSTCO",
+            amount = "-\$384.91", account = "Chequing", owner = "test")
+        assertEquals(3, writer.findRow(target, rows))
+    }
 
-        every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(
-            listOf("Transaction ID" as Any),
-            listOf("txn-100" as Any),
+    @Test
+    fun `findRow falls back to durable match for non-durable ID`() {
+        // Target has a regular ID that doesn't match any row's ID,
+        // but content matches row 3 via durable ID
+        val rows = listOf(
+            SheetTransaction(2, makeTx("txn-100", date = "1/1/2026", description = "Other")),
+            SheetTransaction(3, makeTx("txn-999", date = "2/15/2026", description = "COSTCO",
+                amount = "-\$384.91", account = "Chequing", owner = "test")),
+        )
+        val target = makeTx("txn-no-match", date = "2/15/2026", description = "COSTCO",
+            amount = "-\$384.91", account = "Chequing", owner = "test")
+        assertEquals(3, writer.findRow(target, rows))
+    }
+
+    // --- writeCategory tests (mock sheetsClient.readAllRows()) ---
+
+    @Test
+    fun `writeCategory throws RowNotFoundException when row not found`() {
+        val tx = makeTx(transactionId = "txn-missing", category = "Groceries")
+
+        every { sheetsClient.readAllRows() } returns listOf(
+            header,
+            makeSheetRow(transactionId = "txn-100"),
         )
 
         assertThrows<RowNotFoundException> { writer.writeCategory(tx) }
@@ -96,18 +153,11 @@ class CategoryWriterTest {
 
     @Test
     fun `writeCategory skips when row already has category`() {
-        val tx = Transaction.newBuilder()
-            .setTransactionId("txn-100")
-            .setDate("1/1/2026")
-            .setDescription("Test")
-            .setCategory("Groceries")
-            .setAmount("\$10")
-            .setAccount("Visa")
-            .build()
+        val tx = makeTx(transactionId = "txn-100", category = "Groceries")
 
-        every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(
-            listOf("Transaction ID" as Any),
-            listOf("txn-100" as Any), // row 2
+        every { sheetsClient.readAllRows() } returns listOf(
+            header,
+            makeSheetRow(transactionId = "txn-100"),
         )
         every { sheetsClient.readAllRows("Transactions!C2:C2") } returns
             listOf(listOf("Existing Category" as Any))
@@ -119,18 +169,11 @@ class CategoryWriterTest {
 
     @Test
     fun `writeCategory writes category and date when row is empty`() {
-        val tx = Transaction.newBuilder()
-            .setTransactionId("txn-100")
-            .setDate("1/1/2026")
-            .setDescription("Test")
-            .setCategory("Groceries")
-            .setAmount("\$10")
-            .setAccount("Visa")
-            .build()
+        val tx = makeTx(transactionId = "txn-100", category = "Groceries")
 
-        every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(
-            listOf("Transaction ID" as Any),
-            listOf("txn-100" as Any), // row 2
+        every { sheetsClient.readAllRows() } returns listOf(
+            header,
+            makeSheetRow(transactionId = "txn-100"),
         )
         every { sheetsClient.readAllRows("Transactions!C2:C2") } returns
             listOf(listOf("" as Any))
@@ -172,9 +215,9 @@ class CategoryWriterTest {
         }
 
         // Row not found — findRow returns null
-        every { sheetsClient.readAllRows("Transactions!J:J") } returns listOf(
-            listOf("Transaction ID" as Any),
-            listOf("txn-100" as Any),
+        every { sheetsClient.readAllRows() } returns listOf(
+            header,
+            makeSheetRow(transactionId = "txn-100"),
         )
 
         val writer = CategoryWriter(config, sheetsClient)

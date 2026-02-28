@@ -6,7 +6,10 @@ import org.apache.kafka.clients.producer.ProducerRecord
 import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
+import org.jevy.bookkeeper.producer.DurableTransactionId
+import org.jevy.bookkeeper.sheets.SheetTransaction
 import org.jevy.bookkeeper.sheets.SheetsClient
+import org.jevy.bookkeeper.sheets.TransactionMapper
 import org.jevy.bookkeeper_agent.Transaction
 import org.slf4j.LoggerFactory
 import java.time.Duration
@@ -93,7 +96,17 @@ class CategoryWriter(
         }
 
         val transactionId = transaction.getTransactionId().toString()
-        val rowNumber = findRow(transactionId)
+
+        val allRows = sheetsClient.readAllRows()
+        if (allRows.isEmpty()) throw RowNotFoundException("No rows found for transaction $transactionId")
+
+        val header = allRows.first().map { it.toString() }
+        val colIndex = header.withIndex().associate { (i, name) -> name to i }
+        val indexed = allRows.drop(1).mapIndexed { i, row ->
+            SheetTransaction(i + 2, TransactionMapper.fromSheetRow(row, colIndex, config.googleSheetId))
+        }
+
+        val rowNumber = findRow(transaction, indexed)
 
         if (rowNumber == null) {
             skippedCounter.increment()
@@ -119,14 +132,21 @@ class CategoryWriter(
         writtenCounter.increment()
     }
 
-    internal fun findRow(transactionId: String): Int? {
-        val txIdCol = columnLetters["Transaction ID"] ?: "J"
-        val allRows = sheetsClient.readAllRows("Transactions!${txIdCol}:${txIdCol}")
-        for ((index, row) in allRows.withIndex()) {
-            if (row.firstOrNull()?.toString() == transactionId) {
-                return index + 1 // 1-indexed
-            }
+    internal fun findRow(target: Transaction, rows: List<SheetTransaction>): Int? {
+        val targetId = target.getTransactionId().toString()
+        val isDurable = targetId.startsWith("durable-")
+
+        // Tier 1: match by Transaction ID attribute
+        if (!isDurable) {
+            rows.find { it.transaction.getTransactionId().toString() == targetId }
+                ?.let { return it.rowNumber }
         }
+
+        // Tier 2: match by content-based durable ID
+        val expectedId = DurableTransactionId.generate(target)
+        rows.find { DurableTransactionId.generate(it.transaction) == expectedId }
+            ?.let { return it.rowNumber }
+
         return null
     }
 }

@@ -1,8 +1,17 @@
 package org.jevy.bookkeeper.producer
 
+import org.jevy.bookkeeper_agent.Transaction
 import java.security.MessageDigest
 
 object DurableTransactionId {
+
+    fun generate(transaction: Transaction): String = generate(
+        owner = transaction.getOwner()?.toString() ?: "",
+        date = transaction.getDate().toString(),
+        description = transaction.getDescription().toString(),
+        amount = transaction.getAmount().toString(),
+        account = transaction.getAccount().toString(),
+    )
 
     fun generate(owner: String, date: String, description: String, amount: String, account: String): String {
         val normalized = listOf(

@@ -7,6 +7,7 @@ import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
 import org.jevy.bookkeeper.sheets.SheetsClient
+import org.jevy.bookkeeper.sheets.TransactionMapper
 import org.jevy.bookkeeper_agent.Transaction
 import org.slf4j.LoggerFactory
 import java.time.LocalDate
@@ -112,53 +113,25 @@ class TransactionProducer(
         }
 
         internal fun rowToTransaction(row: List<Any>, colIndex: Map<String, Int>, maxAgeDays: Long = 365, owner: String? = null): Transaction? {
-            fun col(name: String): String? = colIndex[name]?.let { row.getOrNull(it)?.toString() }
+            val transaction = TransactionMapper.fromSheetRow(row, colIndex, owner)
 
-            val category = col("Category") ?: ""
-            if (category.isNotBlank()) return null
-
-            val description = col("Description") ?: "(no description)"
-            val transactionId = col("Transaction ID")?.takeIf { it.isNotBlank() }
-                ?: DurableTransactionId.generate(
-                    owner = owner ?: "",
-                    date = col("Date") ?: "",
-                    description = description,
-                    amount = col("Amount") ?: "",
-                    account = col("Account") ?: "",
-                )
+            // Producer-specific filtering: skip categorized
+            if (!transaction.getCategory().isNullOrBlank()) return null
 
             // Skip transactions older than maxAgeDays
-            val dateStr = col("Date") ?: ""
+            val dateStr = transaction.getDate()?.toString() ?: ""
             if (dateStr.isNotBlank()) {
                 try {
                     val txDate = LocalDate.parse(dateStr, DateTimeFormatter.ofPattern("M/d/yyyy"))
                     if (txDate.isBefore(LocalDate.now().minusDays(maxAgeDays))) {
-                        skipLogger.info("Skipped row: too old ({}) — id={}, desc={}", dateStr, transactionId, description)
+                        skipLogger.info("Skipped row: too old ({}) — id={}, desc={}", dateStr, transaction.getTransactionId(), transaction.getDescription())
                         return null
                     }
-                } catch (_: DateTimeParseException) {
-                    // If date can't be parsed, include the transaction
-                }
+                } catch (_: DateTimeParseException) {}
             }
 
-            return Transaction.newBuilder()
-                .setTransactionId(transactionId)
-                .setDate(col("Date") ?: "")
-                .setDescription(col("Description") ?: "")
-                .setCategory(null)
-                .setAmount(col("Amount") ?: "")
-                .setAccount(col("Account") ?: "")
-                .setAccountNumber(col("Account #"))
-                .setInstitution(col("Institution"))
-                .setMonth(col("Month"))
-                .setWeek(col("Week"))
-                .setCheckNumber(col("Check Number"))
-                .setFullDescription(col("Full Description"))
-                .setNote(col("Note"))
-                .setSource(col("Source"))
-                .setDateAdded(col("Date Added"))
-                .setOwner(owner)
-                .build()
+            // Clear category for uncategorized topic
+            return Transaction.newBuilder(transaction).setCategory(null).build()
         }
     }
 }
