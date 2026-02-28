@@ -1,6 +1,6 @@
-# Tiller Categorizer Agent
+# Bookkeeper Agent
 
-Automated transaction categorization for Tiller (Yodlee -> Google Sheets) bookkeeping.
+Automated transaction categorization for bookkeeping (Yodlee -> Google Sheets).
 
 ## Overview
 
@@ -126,7 +126,7 @@ Consumes categorized transactions and writes the category back to the Google She
 {
   "type": "record",
   "name": "Transaction",
-  "namespace": "org.jevy.tiller_categorizer_agent",
+  "namespace": "org.jevy.bookkeeper_agent",
   "fields": [
     {"name": "transaction_id",   "type": "string",            "doc": "Yodlee-generated unique ID (Kafka message key)"},
     {"name": "date",             "type": "string",            "doc": "Transaction date (M/d/yyyy)"},
@@ -180,7 +180,7 @@ Consumes categorized transactions and writes the category back to the Google She
 ## Project Structure
 
 ```
-tiller-categorizer-agent/
+bookkeeper-agent/
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties
@@ -189,7 +189,7 @@ tiller-categorizer-agent/
 │   └── main/
 │       ├── avro/
 │       │   └── Transaction.avsc
-│       ├── kotlin/org/jevy/tiller/categorizer/
+│       ├── kotlin/org/jevy/bookkeeper/
 │       │   ├── Main.kt                          # CLI: producer | categorizer | writer
 │       │   ├── config/
 │       │   │   └── AppConfig.kt                 # Environment variable config

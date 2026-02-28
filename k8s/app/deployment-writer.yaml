@@ -1,25 +1,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tiller-writer
+  name: bookkeeper-writer
   labels:
-    app: tiller-categorizer
+    app: bookkeeper
     component: writer
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: tiller-categorizer
+      app: bookkeeper
       component: writer
   template:
     metadata:
       labels:
-        app: tiller-categorizer
+        app: bookkeeper
         component: writer
     spec:
       containers:
         - name: writer
-          image: ghcr.io/jevy/tiller-categorizer-agent:0.8.3
+          image: ghcr.io/jevy/bookkeeper-agent:0.8.3
           args: ["writer"]
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
@@ -29,12 +29,12 @@ spec:
             - name: GOOGLE_SHEET_ID
               valueFrom:
                 secretKeyRef:
-                  name: tiller-categorizer
+                  name: bookkeeper
                   key: GOOGLE_SHEET_ID
             - name: GOOGLE_CREDENTIALS_JSON
               valueFrom:
                 secretKeyRef:
-                  name: tiller-categorizer
+                  name: bookkeeper
                   key: GOOGLE_CREDENTIALS_JSON
           ports:
             - containerPort: 9091

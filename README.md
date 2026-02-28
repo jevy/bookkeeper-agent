@@ -1,6 +1,6 @@
-# Tiller Categorizer Agent
+# Bookkeeper Agent
 
-Automated transaction categorization for [Tiller](https://www.tillerhq.com/) spreadsheets. Reads uncategorized transactions from your Google Sheet, uses an AI agent to determine the correct category, and writes the result back.
+Automated transaction categorization for bookkeeping spreadsheets. Reads uncategorized transactions from your Google Sheet, uses an AI agent to determine the correct category, and writes the result back. Supports [Tiller](https://www.tillerhq.com/) spreadsheets out of the box.
 
 ## Architecture
 
@@ -84,7 +84,7 @@ docker compose up writer
 Container images are published to GitHub Container Registry on tagged releases:
 
 ```bash
-docker pull ghcr.io/jevy/tiller-categorizer-agent:0.7.0
+docker pull ghcr.io/jevy/bookkeeper-agent:0.7.0
 ```
 
 Kubernetes manifests are provided in `k8s/` using Kustomize:
@@ -93,7 +93,7 @@ Kubernetes manifests are provided in `k8s/` using Kustomize:
 kubectl apply -k k8s/
 ```
 
-You'll need to create a `tiller-categorizer` Secret in your namespace with the required API keys and credentials.
+You'll need to create a `bookkeeper` Secret in your namespace with the required API keys and credentials.
 
 ## Building
 
@@ -102,7 +102,7 @@ Requires JDK 21.
 ```bash
 ./gradlew build          # compile + test
 ./gradlew installDist    # build distributable
-docker build -t tiller-categorizer-agent .
+docker build -t bookkeeper-agent .
 ```
 
 ## Releasing

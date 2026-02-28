@@ -1,7 +1,7 @@
 {
   "type": "record",
   "name": "Transaction",
-  "namespace": "org.jevy.tiller_categorizer_agent",
+  "namespace": "org.jevy.bookkeeper_agent",
   "fields": [
     {"name": "transaction_id",   "type": "string",            "doc": "Yodlee-generated unique ID (Kafka message key)"},
     {"name": "date",             "type": "string",            "doc": "Transaction date (M/d/yyyy)"},

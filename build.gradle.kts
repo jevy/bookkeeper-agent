@@ -75,11 +75,11 @@ kotlin {
 }
 
 application {
-    mainClass.set("org.jevy.tiller.categorizer.MainKt")
+    mainClass.set("org.jevy.bookkeeper.MainKt")
 }
 
 tasks.jar {
     manifest {
-        attributes["Main-Class"] = "org.jevy.tiller.categorizer.MainKt"
+        attributes["Main-Class"] = "org.jevy.bookkeeper.MainKt"
     }
 }

@@ -1,1 +1,1 @@
-rootProject.name = "tiller-categorizer-agent"
+rootProject.name = "bookkeeper-agent"

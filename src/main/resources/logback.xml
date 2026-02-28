@@ -5,7 +5,7 @@
         </encoder>
     </appender>
 
-    <logger name="org.jevy.tiller.categorizer" level="DEBUG" />
+    <logger name="org.jevy.bookkeeper" level="DEBUG" />
     <logger name="org.apache.kafka" level="WARN" />
 
     <root level="INFO">

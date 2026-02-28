@@ -1,9 +1,9 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: tiller-producer
+  name: bookkeeper-producer
   labels:
-    app: tiller-categorizer
+    app: bookkeeper
     component: producer
 spec:
   schedule: "*/5 * * * *"
@@ -15,13 +15,13 @@ spec:
       template:
         metadata:
           labels:
-            app: tiller-categorizer
+            app: bookkeeper
             component: producer
         spec:
           restartPolicy: OnFailure
           containers:
             - name: producer
-              image: ghcr.io/jevy/tiller-categorizer-agent:0.8.3
+              image: ghcr.io/jevy/bookkeeper-agent:0.8.3
               args: ["producer"]
               env:
                 - name: KAFKA_BOOTSTRAP_SERVERS
@@ -31,12 +31,12 @@ spec:
                 - name: GOOGLE_SHEET_ID
                   valueFrom:
                     secretKeyRef:
-                      name: tiller-categorizer
+                      name: bookkeeper
                       key: GOOGLE_SHEET_ID
                 - name: GOOGLE_CREDENTIALS_JSON
                   valueFrom:
                     secretKeyRef:
-                      name: tiller-categorizer
+                      name: bookkeeper
                       key: GOOGLE_CREDENTIALS_JSON
                 - name: MAX_TRANSACTION_AGE_DAYS
                   value: "365"

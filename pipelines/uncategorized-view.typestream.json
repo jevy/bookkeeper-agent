@@ -1,5 +1,5 @@
 {
-  "name": "tiller-uncategorized-view",
+  "name": "bookkeeper-uncategorized-view",
   "version": "1",
   "description": "Materializes transactions.uncategorized as a KTable for accurate pending count",
   "graph": {

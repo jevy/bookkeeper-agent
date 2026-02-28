@@ -1,14 +1,14 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: tiller-consumer-alerts
+  name: bookkeeper-consumer-alerts
   labels:
-    app: tiller-categorizer
+    app: bookkeeper
 spec:
   groups:
-    - name: tiller-consumer-group
+    - name: bookkeeper-consumer-group
       rules:
-        - alert: TillerConsumerGroupMembersLow
+        - alert: BookkeeperConsumerGroupMembersLow
           expr: redpanda_kafka_consumer_group_consumers{redpanda_group="categorizer-agent"} < 3
           for: 5m
           labels:
@@ -16,7 +16,7 @@ spec:
           annotations:
             summary: "Categorizer consumer group has fewer than 3 members"
             description: "Consumer group categorizer-agent has {{ $value }} members (expected 3)"
-        - alert: TillerConsumerGroupMembersLow
+        - alert: BookkeeperConsumerGroupMembersLow
           expr: redpanda_kafka_consumer_group_consumers{redpanda_group="category-writer"} < 1
           for: 5m
           labels:

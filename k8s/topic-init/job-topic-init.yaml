@@ -1,9 +1,9 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tiller-topic-init
+  name: bookkeeper-topic-init
   labels:
-    app: tiller-categorizer
+    app: bookkeeper
     component: topic-init
 spec:
   backoffLimit: 3
@@ -11,13 +11,13 @@ spec:
   template:
     metadata:
       labels:
-        app: tiller-categorizer
+        app: bookkeeper
         component: topic-init
     spec:
       restartPolicy: OnFailure
       containers:
         - name: topic-init
-          image: ghcr.io/jevy/tiller-categorizer-agent:0.8.3
+          image: ghcr.io/jevy/bookkeeper-agent:0.8.3
           args: ["init"]
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
