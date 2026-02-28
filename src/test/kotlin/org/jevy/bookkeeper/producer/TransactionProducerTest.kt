@@ -6,6 +6,7 @@ import java.time.format.DateTimeFormatter
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class TransactionProducerTest {
 
@@ -68,11 +69,13 @@ class TransactionProducerTest {
     }
 
     @Test
-    fun `rowToTransaction returns null when transaction ID is missing`() {
+    fun `rowToTransaction generates durable ID when transaction ID is missing`() {
         val row = makeRow(transactionId = "")
-        val tx = TransactionProducer.rowToTransaction(row, colIndex)
+        val tx = TransactionProducer.rowToTransaction(row, colIndex, owner = "sheet-123")
 
-        assertNull(tx)
+        assertNotNull(tx)
+        assertTrue(tx.getTransactionId().toString().startsWith("durable-"))
+        assertEquals(24, tx.getTransactionId().toString().length)
     }
 
     @Test
@@ -105,5 +108,30 @@ class TransactionProducerTest {
         assertEquals("COSTCO", tx.getDescription().toString())
         assertNull(tx.getFullDescription()) // column 11 missing
         assertNull(tx.getSource()) // column 14 missing
+    }
+
+    @Test
+    fun `rowToTransaction generates durable ID for real Amazon import row`() {
+        val row = makeRow(
+            date = "2/17/2026",
+            description = "[Amazon Item] Amazon Basics Multipurpose Copy Printer Paper, 8.5\" x 11\", 20 lb, 3 Reams, 1500 Sheets, 92 Bright, White",
+            amount = "-\$37.27",
+            account = "Visa - 9472",
+            institution = "Amazon",
+            month = "2/1/26",
+            week = "2/15/26",
+            transactionId = "",
+            fullDescription = "Amazon Order ID 701-6831869-1429845: Amazon Basics Multipurpose Copy Printer Paper",
+            source = "",
+            dateAdded = "2/27/26",
+        )
+        val tx = TransactionProducer.rowToTransaction(row, colIndex, owner = "sheet-123")
+
+        assertNotNull(tx)
+        assertTrue(tx.getTransactionId().toString().startsWith("durable-"))
+        assertEquals(24, tx.getTransactionId().toString().length)
+        assertEquals("[Amazon Item] Amazon Basics Multipurpose Copy Printer Paper, 8.5\" x 11\", 20 lb, 3 Reams, 1500 Sheets, 92 Bright, White", tx.getDescription().toString())
+        assertEquals("-\$37.27", tx.getAmount().toString())
+        assertEquals("Visa - 9472", tx.getAccount().toString())
     }
 }

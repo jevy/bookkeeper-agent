@@ -54,14 +54,29 @@ class TransactionProducer(
                     continue
                 }
 
-                val record = ProducerRecord(TopicNames.UNCATEGORIZED, transaction.getTransactionId().toString(), transaction)
+                val txId = transaction.getTransactionId().toString()
+                val record = ProducerRecord(TopicNames.UNCATEGORIZED, txId, transaction)
                 producer.send(record) { metadata, exception ->
                     if (exception != null) {
                         publishErrors.incrementAndGet()
-                        logger.error("Failed to publish transaction {}", transaction.getTransactionId(), exception)
+                        logger.error("Failed to publish transaction {}", txId, exception)
                     } else {
                         logger.debug("Published transaction {} to partition {} offset {}",
-                            transaction.getTransactionId(), metadata.partition(), metadata.offset())
+                            txId, metadata.partition(), metadata.offset())
+                    }
+                }
+
+                // Write back durable ID to sheet so CategoryWriter.findRow() can locate it later
+                if (txId.startsWith("durable-")) {
+                    val txIdCol = colIndex["Transaction ID"]
+                    if (txIdCol != null) {
+                        val cellRef = "Transactions!${colLetter(txIdCol)}$rowNumber"
+                        try {
+                            sheetsClient.writeCell(cellRef, txId)
+                            logger.debug("Wrote durable ID {} to {}", txId, cellRef)
+                        } catch (e: Exception) {
+                            logger.warn("Failed to write durable ID {} to sheet: {}", txId, e.message)
+                        }
                     }
                 }
                 published++
@@ -86,6 +101,16 @@ class TransactionProducer(
     companion object {
         private val skipLogger = LoggerFactory.getLogger("TransactionProducer.skip")
 
+        private fun colLetter(index: Int): String {
+            var n = index
+            val sb = StringBuilder()
+            while (n >= 0) {
+                sb.insert(0, ('A' + n % 26))
+                n = n / 26 - 1
+            }
+            return sb.toString()
+        }
+
         internal fun rowToTransaction(row: List<Any>, colIndex: Map<String, Int>, maxAgeDays: Long = 365, owner: String? = null): Transaction? {
             fun col(name: String): String? = colIndex[name]?.let { row.getOrNull(it)?.toString() }
 
@@ -93,11 +118,14 @@ class TransactionProducer(
             if (category.isNotBlank()) return null
 
             val description = col("Description") ?: "(no description)"
-            val transactionId = col("Transaction ID")
-            if (transactionId == null || transactionId.isBlank()) {
-                skipLogger.info("Skipped row: missing Transaction ID — date={}, desc={}, cols={}", col("Date"), description, row.size)
-                return null
-            }
+            val transactionId = col("Transaction ID")?.takeIf { it.isNotBlank() }
+                ?: DurableTransactionId.generate(
+                    owner = owner ?: "",
+                    date = col("Date") ?: "",
+                    description = description,
+                    amount = col("Amount") ?: "",
+                    account = col("Account") ?: "",
+                )
 
             // Skip transactions older than maxAgeDays
             val dateStr = col("Date") ?: ""
