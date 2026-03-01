@@ -109,11 +109,21 @@ class CategorizerAgent(
 
     private inner class CategorizerTools {
         var submitResult: CategorizationResult? = null
+        private var researchCallCount = 0
+
+        private fun guardResearchLimit(): String? {
+            researchCallCount++
+            if (researchCallCount > 7) {
+                return "ERROR: Maximum research calls exceeded. You MUST call submit_category now."
+            }
+            return null
+        }
 
         @Tool(name = "sheet_lookup", description = "Search past transactions in the Google Sheet by description. Returns rows that have been previously categorized with similar merchant names.")
         fun sheetLookup(
             @ToolParam(description = "Search term to match against the Description or Full Description columns") query: String,
         ): String {
+            guardResearchLimit()?.let { return it }
             meterRegistry.counter("bookkeeper.categorizer.tool.calls", "tool", "sheet_lookup").increment()
             return sheetLookupTool.execute(query)
         }
@@ -122,6 +132,7 @@ class CategorizerAgent(
         fun webSearch(
             @ToolParam(description = "Search query") query: String,
         ): String {
+            guardResearchLimit()?.let { return it }
             meterRegistry.counter("bookkeeper.categorizer.tool.calls", "tool", "web_search").increment()
             return webSearchTool.execute(query)
         }
@@ -130,6 +141,7 @@ class CategorizerAgent(
         fun categoryLookup(
             @ToolParam(description = "The exact category name to look up") category: String,
         ): String {
+            guardResearchLimit()?.let { return it }
             meterRegistry.counter("bookkeeper.categorizer.tool.calls", "tool", "category_lookup").increment()
             val results = sheetsClient.searchByCategory(category)
             logger.info("Category lookup '{}': {} transactions", category, results.size)
@@ -140,13 +152,14 @@ class CategorizerAgent(
         fun autocatLookup(
             @ToolParam(description = "The transaction description to match against AutoCat rules") description: String,
         ): String {
+            guardResearchLimit()?.let { return it }
             meterRegistry.counter("bookkeeper.categorizer.tool.calls", "tool", "autocat_lookup").increment()
             val results = sheetsClient.searchAutocat(description)
             logger.info("AutoCat lookup '{}': {} rules matched", description, results.size)
             return gson.toJson(results)
         }
 
-        @Tool(name = "submit_category", description = "Submit your final categorization. Call this when you have determined the category for the transaction.")
+        @Tool(name = "submit_category", description = "Submit your final categorization. Call this when you have determined the category for the transaction.", returnDirect = true)
         fun submitCategory(
             @ToolParam(description = "The exact category name, or 'null' if you cannot determine it") category: String,
             @ToolParam(description = "Brief explanation of why this category was chosen") justification: String?,
@@ -241,11 +254,12 @@ class CategorizerAgent(
             .system(systemPrompt)
             .user(userMessage)
             .tools(tools)
+            .options(OpenAiChatOptions.builder().toolChoice("required").build())
             .call()
             .content()
 
         val result = tools.submitResult ?: kotlin.run {
-            logger.warn("Agent did not call submit_category for '{}'", transaction.getDescription())
+            logger.error("Agent did not call submit_category for '{}' — this should be unreachable with toolChoice=required + returnDirect", transaction.getDescription())
             return null
         }
         return if (result.category.isBlank() || result.category.equals("null", ignoreCase = true)) null
