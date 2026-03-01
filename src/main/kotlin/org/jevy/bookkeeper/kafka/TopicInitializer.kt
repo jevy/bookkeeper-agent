@@ -41,16 +41,18 @@ object TopicInitializer {
         TopicSpec(
             name = TopicNames.CATEGORIZATION_FAILED,
             config = mapOf(
-                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_DELETE,
-                TopicConfig.RETENTION_MS_CONFIG to "${30 * 24 * 60 * 60 * 1000L}", // 30 days
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.DELETE_RETENTION_MS_CONFIG to "86400000", // tombstones retained 24h
             ),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
         ),
         TopicSpec(
             name = TopicNames.WRITE_FAILED,
             config = mapOf(
-                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_DELETE,
-                TopicConfig.RETENTION_MS_CONFIG to "${30 * 24 * 60 * 60 * 1000L}", // 30 days
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.DELETE_RETENTION_MS_CONFIG to "86400000", // tombstones retained 24h
             ),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
         ),
     )
 
