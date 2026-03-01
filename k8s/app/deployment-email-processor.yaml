@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookkeeper-email-processor
+  labels:
+    app: bookkeeper
+    component: email-processor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bookkeeper
+      component: email-processor
+  template:
+    metadata:
+      labels:
+        app: bookkeeper
+        component: email-processor
+    spec:
+      containers:
+        - name: email-processor
+          image: ghcr.io/jevy/bookkeeper-agent:0.8.3
+          args: ["email-processor"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "redpanda.apps.svc.cluster.local:9093"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://redpanda.apps.svc.cluster.local:8081"
+            - name: GOOGLE_SHEET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: GOOGLE_SHEET_ID
+            - name: GOOGLE_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: GOOGLE_CREDENTIALS_JSON
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: AWS_REGION
+            - name: S3_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: S3_BUCKET
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: AWS_SECRET_ACCESS_KEY
+          ports:
+            - containerPort: 9091
+              name: metrics
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

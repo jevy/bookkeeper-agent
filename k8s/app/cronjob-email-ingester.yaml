@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: bookkeeper-email-ingester
+  labels:
+    app: bookkeeper
+    component: email-ingester
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: bookkeeper
+            component: email-ingester
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: email-ingester
+              image: ghcr.io/jevy/bookkeeper-agent:0.8.3
+              args: ["email-ingester"]
+              env:
+                - name: KAFKA_BOOTSTRAP_SERVERS
+                  value: "redpanda.apps.svc.cluster.local:9093"
+                - name: SCHEMA_REGISTRY_URL
+                  value: "http://redpanda.apps.svc.cluster.local:8081"
+                - name: GOOGLE_SHEET_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: bookkeeper
+                      key: GOOGLE_SHEET_ID
+                - name: GOOGLE_CREDENTIALS_JSON
+                  valueFrom:
+                    secretKeyRef:
+                      name: bookkeeper
+                      key: GOOGLE_CREDENTIALS_JSON
+                - name: AWS_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: bookkeeper
+                      key: AWS_REGION
+                - name: S3_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: bookkeeper
+                      key: S3_BUCKET
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: bookkeeper
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: bookkeeper
+                      key: AWS_SECRET_ACCESS_KEY
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

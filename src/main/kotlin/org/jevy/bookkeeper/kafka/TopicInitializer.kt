@@ -54,6 +54,19 @@ object TopicInitializer {
             ),
             deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
         ),
+        TopicSpec(
+            name = TopicNames.EMAIL_INBOX,
+            config = mapOf(
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.DELETE_RETENTION_MS_CONFIG to "604800000", // tombstones retained 7d
+            ),
+        ),
+        TopicSpec(
+            name = TopicNames.EMAIL_PROCESSED,
+            config = mapOf(
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
+            ),
+        ),
     )
 
     fun run(bootstrapServers: String) {

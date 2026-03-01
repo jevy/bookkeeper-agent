@@ -22,6 +22,7 @@ val springAiVersion = "1.1.2"
 val micrometerVersion = "1.14.4"
 val logbackVersion = "1.5.16"
 val slf4jVersion = "2.0.17"
+val awsSdkVersion = "2.29.45"
 
 dependencies {
     // Kafka
@@ -51,6 +52,14 @@ dependencies {
 
     // JSON parsing (used by tools)
     implementation("com.google.code.gson:gson:2.12.1")
+
+    // AWS SDK (SES for email sending, S3 for email storage/mappings)
+    implementation("software.amazon.awssdk:ses:$awsSdkVersion")
+    implementation("software.amazon.awssdk:s3:$awsSdkVersion")
+
+    // Jakarta Mail (MIME email parsing)
+    implementation("jakarta.mail:jakarta.mail-api:2.1.3")
+    runtimeOnly("org.eclipse.angus:angus-mail:2.0.3")
 
     // Logging
     implementation("org.slf4j:slf4j-api:$slf4jVersion")

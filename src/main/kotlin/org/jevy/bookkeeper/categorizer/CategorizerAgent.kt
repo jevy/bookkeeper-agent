@@ -98,6 +98,7 @@ class CategorizerAgent(
         - If a merchant is unfamiliar, use web search to understand what the business is.
         - Before giving your final answer, use category_lookup to review the last 20 transactions in your proposed category. Make sure the transaction fits the pattern.
         - If you are less than 70% confident in a category, use "Unknown".
+        - If the transaction includes user-provided context (e.g., a correction or hint), treat it as a strong suggestion. Strongly prefer the user's suggested category unless it clearly doesn't match any available category.
 
         You have a maximum of 5 tool calls for research (sheet_lookup, web_search, category_lookup, autocat_lookup).
         You MUST call submit_category with your final answer. Do not exceed 5 research calls.
@@ -240,13 +241,17 @@ class CategorizerAgent(
     }
 
     internal fun categorize(transaction: Transaction): CategorizationResult? {
-        val userMessage =
-            "Categorize this transaction:\n" +
-                "Description: ${transaction.getDescription()}\n" +
-                "Full Description: ${transaction.getFullDescription() ?: "N/A"}\n" +
-                "Amount: ${transaction.getAmount()}\n" +
-                "Account: ${transaction.getAccount()}\n" +
-                "Date: ${transaction.getDate()}"
+        val userMessage = buildString {
+            append("Categorize this transaction:\n")
+            append("Description: ${transaction.getDescription()}\n")
+            append("Full Description: ${transaction.getFullDescription() ?: "N/A"}\n")
+            append("Amount: ${transaction.getAmount()}\n")
+            append("Account: ${transaction.getAccount()}\n")
+            append("Date: ${transaction.getDate()}")
+            transaction.getNote()?.toString()?.takeIf { it.isNotBlank() }?.let {
+                append("\n\nUser-provided context: $it")
+            }
+        }
 
         val tools = CategorizerTools()
 

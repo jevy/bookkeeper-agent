@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "EmailMessage",
+  "namespace": "org.jevy.bookkeeper_agent",
+  "fields": [
+    {"name": "message_id",   "type": "string",  "doc": "MIME Message-ID header"},
+    {"name": "subject",      "type": "string",  "doc": "Email subject line"},
+    {"name": "from_address", "type": "string",  "doc": "Sender email address"},
+    {"name": "body_text",    "type": "string",  "doc": "Plain-text email body"},
+    {"name": "s3_key",       "type": "string",  "doc": "S3 object key for the raw email"},
+    {"name": "received_at",  "type": "string",  "doc": "ISO-8601 timestamp when the email was ingested"}
+  ]
+}

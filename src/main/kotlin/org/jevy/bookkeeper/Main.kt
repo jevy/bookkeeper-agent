@@ -2,6 +2,9 @@ package org.jevy.bookkeeper
 
 import org.jevy.bookkeeper.categorizer.CategorizerAgent
 import org.jevy.bookkeeper.config.AppConfig
+import org.jevy.bookkeeper.digest.DigestSender
+import org.jevy.bookkeeper.digest.EmailIngester
+import org.jevy.bookkeeper.digest.EmailProcessor
 import org.jevy.bookkeeper.kafka.TopicInitializer
 import org.jevy.bookkeeper.metrics.Metrics
 import org.jevy.bookkeeper.producer.TransactionProducer
@@ -13,7 +16,7 @@ private val logger = LoggerFactory.getLogger("org.jevy.bookkeeper.Main")
 
 fun main(args: Array<String>) {
     val command = args.firstOrNull() ?: run {
-        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay>")
+        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor>")
         System.exit(1)
         return
     }
@@ -68,9 +71,28 @@ fun main(args: Array<String>) {
             logger.info("Starting DLQ Replayer")
             DlqReplayer(config).run()
         }
+        "digest-sender" -> {
+            val config = AppConfig.fromEnv()
+            logger.info("Starting Digest Sender")
+            DigestSender(config).run()
+        }
+        "email-ingester" -> {
+            val config = AppConfig.fromEnv()
+            logger.info("Starting Email Ingester")
+            EmailIngester(config).run()
+        }
+        "email-processor" -> {
+            val config = AppConfig.fromEnv()
+            Metrics.startHttpServer(config.metricsPort)
+            logger.info("Starting Email Processor")
+            EmailProcessor(config).run(
+                onActivity = Metrics::updateActivity,
+                onAlive = Metrics::setConsumerAlive,
+            )
+        }
         else -> {
             System.err.println("Unknown command: $command")
-            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay>")
+            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor>")
             System.exit(1)
         }
     }

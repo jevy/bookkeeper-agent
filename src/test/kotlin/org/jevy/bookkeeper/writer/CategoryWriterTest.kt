@@ -176,7 +176,23 @@ class CategoryWriterTest {
     }
 
     @Test
-    fun `writeCategory skips when row already has category`() {
+    fun `writeCategory skips when row already has same category`() {
+        val tx = makeTx(transactionId = "txn-100", category = "Groceries")
+
+        every { sheetsClient.readAllRows() } returns listOf(
+            header,
+            makeSheetRow(transactionId = "txn-100"),
+        )
+        every { sheetsClient.readAllRows("Transactions!C2:C2") } returns
+            listOf(listOf("Groceries" as Any))
+
+        writer.writeCategory(tx)
+
+        verify(exactly = 0) { sheetsClient.writeCell(any(), any()) }
+    }
+
+    @Test
+    fun `writeCategory overwrites when row has different category`() {
         val tx = makeTx(transactionId = "txn-100", category = "Groceries")
 
         every { sheetsClient.readAllRows() } returns listOf(
@@ -188,7 +204,8 @@ class CategoryWriterTest {
 
         writer.writeCategory(tx)
 
-        verify(exactly = 0) { sheetsClient.writeCell(any(), any()) }
+        verify { sheetsClient.writeCell("Transactions!C2", "Groceries") }
+        verify { sheetsClient.writeCell(match { it.startsWith("Transactions!P2") }, any()) }
     }
 
     @Test

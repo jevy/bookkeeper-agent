@@ -12,6 +12,10 @@ data class AppConfig(
     val model: String,
     val metricsPort: Int = 9091,
     val pushgatewayUrl: String? = null,
+    val awsRegion: String = "us-east-1",
+    val s3Bucket: String = "",
+    val sesFromAddress: String = "",
+    val digestToAddress: String = "",
 ) {
     companion object {
         fun fromEnv(): AppConfig = AppConfig(
@@ -26,6 +30,10 @@ data class AppConfig(
             model = System.getenv("MODEL") ?: "anthropic/claude-sonnet-4-6",
             metricsPort = System.getenv("METRICS_PORT")?.toIntOrNull() ?: 9091,
             pushgatewayUrl = System.getenv("PUSHGATEWAY_URL")?.takeIf { it.isNotBlank() },
+            awsRegion = System.getenv("AWS_REGION") ?: "us-east-1",
+            s3Bucket = System.getenv("S3_BUCKET") ?: "",
+            sesFromAddress = System.getenv("SES_FROM_ADDRESS") ?: "",
+            digestToAddress = System.getenv("DIGEST_TO_ADDRESS") ?: "",
         )
 
         private fun requireEnv(name: String): String =

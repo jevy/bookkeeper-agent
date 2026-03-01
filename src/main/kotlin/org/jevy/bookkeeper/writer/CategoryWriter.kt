@@ -117,18 +117,31 @@ class CategoryWriter(
         val categoryCol = columnLetters["Category"] ?: "C"
         val categorizedDateCol = columnLetters["Categorized Date"] ?: "P"
 
-        // Check if already categorized
+        // Check if already categorized — skip only if the existing category matches
         val rows = sheetsClient.readAllRows("Transactions!${categoryCol}$rowNumber:${categoryCol}$rowNumber")
         val existing = rows.firstOrNull()?.firstOrNull()?.toString() ?: ""
-        if (existing.isNotBlank()) {
+        if (existing.isNotBlank() && existing == category) {
             logger.info("Transaction {} already has category '{}', skipping", transactionId, existing)
             skippedCounter.increment()
             return
         }
 
+        if (existing.isNotBlank() && existing != category) {
+            logger.info("Transaction {} category changing from '{}' to '{}'", transactionId, existing, category)
+        }
+
         // Write category and categorized date
         sheetsClient.writeCell("Transactions!${categoryCol}$rowNumber", category)
         sheetsClient.writeCell("Transactions!${categorizedDateCol}$rowNumber", LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy")))
+
+        // Write note if present
+        val note = transaction.getNote()?.toString()
+        if (!note.isNullOrBlank()) {
+            val noteCol = columnLetters["Note"] ?: "N"
+            sheetsClient.writeCell("Transactions!${noteCol}$rowNumber", note)
+            logger.info("Wrote note to row {} for transaction {}", rowNumber, transactionId)
+        }
+
         logger.info("Wrote category '{}' to row {} for transaction {}", category, rowNumber, transactionId)
         writtenCounter.increment()
     }
