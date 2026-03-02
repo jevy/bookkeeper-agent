@@ -1,7 +1,17 @@
 package org.jevy.bookkeeper.digest
 
+import io.mockk.*
+import org.apache.kafka.clients.producer.KafkaProducer
+import org.apache.kafka.clients.producer.ProducerRecord
 import org.jevy.bookkeeper.config.AppConfig
+import org.jevy.bookkeeper_agent.EmailMessage
+import org.jevy.bookkeeper_agent.Transaction
 import org.junit.jupiter.api.Test
+import software.amazon.awssdk.services.s3.S3Client
+import software.amazon.awssdk.services.s3.model.CopyObjectRequest
+import software.amazon.awssdk.services.s3.model.CopyObjectResponse
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest
+import software.amazon.awssdk.services.s3.model.DeleteObjectResponse
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
@@ -148,5 +158,113 @@ class EmailProcessorTest {
     @Test
     fun `extractDigestDate returns null for malformed date`() {
         assertNull(processor.extractDigestDate("Bookkeeper Digest - Not a date (3 transactions)"))
+    }
+
+    // --- processEmail S3 move tests ---
+
+    private fun buildEmail(subject: String, body: String, s3Key: String): EmailMessage {
+        return EmailMessage.newBuilder()
+            .setMessageId("test-msg-id")
+            .setSubject(subject)
+            .setFromAddress("user@test.com")
+            .setBodyText(body)
+            .setS3Key(s3Key)
+            .setReceivedAt("2026-03-02T00:00:00Z")
+            .build()
+    }
+
+    private fun mockS3(): S3Client {
+        val s3 = mockk<S3Client>()
+        every { s3.copyObject(any<CopyObjectRequest>()) } returns CopyObjectResponse.builder().build()
+        every { s3.deleteObject(any<DeleteObjectRequest>()) } returns DeleteObjectResponse.builder().build()
+        return s3
+    }
+
+    private fun mockProducer(): KafkaProducer<String, EmailMessage> {
+        val producer = mockk<KafkaProducer<String, EmailMessage>>()
+        every { producer.send(any<ProducerRecord<String, EmailMessage>>()) } returns mockk()
+        return producer
+    }
+
+    private fun mockTransactionProducer(): KafkaProducer<String, Transaction> {
+        val producer = mockk<KafkaProducer<String, Transaction>>()
+        every { producer.send(any<ProducerRecord<String, Transaction>>()) } returns mockk()
+        every { producer.flush() } just Runs
+        return producer
+    }
+
+    @Test
+    fun `processEmail moves S3 object for non-digest emails`() {
+        val s3 = mockS3()
+        val processedProducer = mockProducer()
+        val transactionProducer = mockTransactionProducer()
+
+        val email = buildEmail(
+            subject = "Amazon SES Setup Notification",
+            body = "Your SES domain has been verified.",
+            s3Key = "ingested/AMAZON_SES_SETUP_NOTIFICATION",
+        )
+
+        processor.processEmail(email, transactionProducer, processedProducer, s3)
+
+        // Verify S3 copy from ingested/ to processed/
+        verify {
+            s3.copyObject(match<CopyObjectRequest> {
+                it.sourceKey() == "ingested/AMAZON_SES_SETUP_NOTIFICATION" &&
+                    it.destinationKey() == "processed/AMAZON_SES_SETUP_NOTIFICATION"
+            })
+        }
+        verify {
+            s3.deleteObject(match<DeleteObjectRequest> {
+                it.key() == "ingested/AMAZON_SES_SETUP_NOTIFICATION"
+            })
+        }
+    }
+
+    @Test
+    fun `processEmail does not move S3 object when key is not in ingested`() {
+        val s3 = mockS3()
+        val processedProducer = mockProducer()
+        val transactionProducer = mockTransactionProducer()
+
+        val email = buildEmail(
+            subject = "Random email",
+            body = "Hello",
+            s3Key = "inbox/some-email",
+        )
+
+        processor.processEmail(email, transactionProducer, processedProducer, s3)
+
+        // S3 copy/delete should NOT be called since key doesn't contain "ingested/"
+        verify(exactly = 0) { s3.copyObject(any<CopyObjectRequest>()) }
+        verify(exactly = 0) { s3.deleteObject(any<DeleteObjectRequest>()) }
+    }
+
+    @Test
+    fun `processEmail moves S3 object for digest reply with no corrections`() {
+        val s3 = mockS3()
+        val processedProducer = mockProducer()
+        val transactionProducer = mockTransactionProducer()
+
+        // Mock the mapping load - return empty mapping
+        every { s3.getObject(any<software.amazon.awssdk.services.s3.model.GetObjectRequest>()) } throws
+            software.amazon.awssdk.services.s3.model.NoSuchKeyException.builder()
+                .message("No mapping").build()
+
+        val email = buildEmail(
+            subject = "Re: Bookkeeper Digest - Mar 2, 2026 (4 transactions)",
+            body = "Thanks, looks good!",
+            s3Key = "ingested/some-reply-email",
+        )
+
+        processor.processEmail(email, transactionProducer, processedProducer, s3)
+
+        // Should still move to processed/ even when mapping load fails
+        verify {
+            s3.copyObject(match<CopyObjectRequest> {
+                it.sourceKey() == "ingested/some-reply-email" &&
+                    it.destinationKey() == "processed/some-reply-email"
+            })
+        }
     }
 }

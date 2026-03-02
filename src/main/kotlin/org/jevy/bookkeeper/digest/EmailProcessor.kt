@@ -80,6 +80,7 @@ class EmailProcessor(
         if (digestDate == null) {
             logger.warn("Could not extract digest date from subject '{}', skipping", subject)
             publishProcessed(processedProducer, email)
+            moveS3Object(s3, email.getS3Key().toString())
             return
         }
 
@@ -89,6 +90,7 @@ class EmailProcessor(
         } catch (e: Exception) {
             logger.error("Could not load mapping for date {}: {}", digestDate, e.message)
             publishProcessed(processedProducer, email)
+            moveS3Object(s3, email.getS3Key().toString())
             return
         }
 
@@ -97,6 +99,7 @@ class EmailProcessor(
         if (corrections.isEmpty()) {
             logger.info("No corrections found in email {}", messageId)
             publishProcessed(processedProducer, email)
+            moveS3Object(s3, email.getS3Key().toString())
             return
         }
 

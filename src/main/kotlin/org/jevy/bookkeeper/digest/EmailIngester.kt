@@ -84,19 +84,6 @@ class EmailIngester(private val config: AppConfig) {
         val from = mimeMessage.from?.firstOrNull()?.toString() ?: ""
         val bodyText = extractTextBody(mimeMessage)
 
-        // Publish to Kafka
-        val emailMessage = EmailMessage.newBuilder()
-            .setMessageId(messageId)
-            .setSubject(subject)
-            .setFromAddress(from)
-            .setBodyText(bodyText)
-            .setS3Key(key)
-            .setReceivedAt(Instant.now().toString())
-            .build()
-
-        producer.send(ProducerRecord(TopicNames.EMAIL_INBOX, messageId, emailMessage))
-        logger.info("Published email {} to {}", messageId, TopicNames.EMAIL_INBOX)
-
         // Move from inbox/ to ingested/
         val ingestedKey = key.replaceFirst("inbox/", "ingested/")
         s3.copyObject(
@@ -114,6 +101,19 @@ class EmailIngester(private val config: AppConfig) {
                 .build()
         )
         logger.info("Moved {} → {}", key, ingestedKey)
+
+        // Publish to Kafka with the ingested key
+        val emailMessage = EmailMessage.newBuilder()
+            .setMessageId(messageId)
+            .setSubject(subject)
+            .setFromAddress(from)
+            .setBodyText(bodyText)
+            .setS3Key(ingestedKey)
+            .setReceivedAt(Instant.now().toString())
+            .build()
+
+        producer.send(ProducerRecord(TopicNames.EMAIL_INBOX, messageId, emailMessage))
+        logger.info("Published email {} to {}", messageId, TopicNames.EMAIL_INBOX)
     }
 
     internal fun extractTextBody(message: MimeMessage): String {
