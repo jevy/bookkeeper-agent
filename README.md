@@ -24,22 +24,26 @@ Six services packaged as a single Docker image with different entrypoints, conne
 graph TD
     Sheets[(Google Sheets)]
 
-    Producer["Producer\n(every 5min CronJob)"]
-    Writer["Writer\n(Deployment)"]
-    Categorizer["Categorizer\n(AI Agent)"]
-    DigestSender["Digest Sender\n(daily 7am CronJob)"]
-    EmailIngester["Email Ingester\n(every 5min CronJob)"]
-    EmailProcessor["Email Processor\n(Deployment)"]
+    subgraph "Bookkeeper Agent (self-hosted)"
+        Producer["Producer\n(every 5min CronJob)"]
+        Writer["Writer\n(Deployment)"]
+        Categorizer["Categorizer\n(AI Agent)"]
+        DigestSender["Digest Sender\n(daily 7am CronJob)"]
+        EmailIngester["Email Ingester\n(every 5min CronJob)"]
+        EmailProcessor["Email Processor\n(Deployment)"]
 
-    SES[AWS SES]
-    S3[AWS S3]
+        subgraph Redpanda
+            uncategorized[transactions.uncategorized]
+            categorized[transactions.categorized]
+            emailInbox[email.inbox]
+            catFailed[transactions.categorization-failed]
+            writeFailed[transactions.write-failed]
+        end
+    end
 
-    subgraph Redpanda
-        uncategorized[transactions.uncategorized]
-        categorized[transactions.categorized]
-        emailInbox[email.inbox]
-        catFailed[transactions.categorization-failed]
-        writeFailed[transactions.write-failed]
+    subgraph AWS
+        SES[SES]
+        S3[S3]
     end
 
     Sheets -- read --> Producer
