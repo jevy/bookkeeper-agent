@@ -1,5 +1,17 @@
 # Bookkeeper Agent
 
+
+---
+
+### Don't want to self-host? We're building a hosted version.
+
+### [Sign up for the waitlist →](https://airtable.com/appXQb0Zj4cMf7uWt/pag0S4I4BFZX0LxWU/form)
+
+AI-powered transaction categorization for your spreadsheet — no infrastructure required.
+
+---
+
+
 Automated transaction categorization for bookkeeping spreadsheets. Reads uncategorized transactions from your Google Sheet, uses an AI agent to determine the correct category, and writes the result back. Supports [Tiller](https://www.tillerhq.com/) spreadsheets out of the box.
 
 Includes a daily email digest so you can review categorizations and reply to correct mistakes — corrections are automatically re-categorized.
@@ -8,52 +20,51 @@ Includes a daily email digest so you can review categorizations and reply to cor
 
 Six services packaged as a single Docker image with different entrypoints, connected via Kafka (Redpanda):
 
-```
-                              ┌─────────────────┐
-                              │  Google Sheets   │
-                              └──┬────────────▲──┘
-                        read     │            │  write category
-                                 ▼            │
-                           ┌──────────┐  ┌────┴────┐
-                           │ Producer │  │  Writer  │
-                           └────┬─────┘  └────▲────┘
-                       publish  │              │ consume
-            ┌───────────────────┼──────────────┼───────────────────┐
-            │               Redpanda                               │
-            │                                                      │
-            │  transactions.uncategorized   transactions.categorized│
-            │  email.inbox                  email.processed         │
-            │  transactions.categorization-failed                  │
-            │  transactions.write-failed                           │
-            └──────┬────▲──────────┬───────────────▲───────────────┘
-          consume  │    │ publish  │ consume       │ publish
-                   ▼    │         ▼               │
-            ┌───────────┴───┐  ┌──────────────────┴───┐
-            │  Categorizer  │  │    Digest Sender      │
-            │  (AI Agent)   │  │  (daily 7am CronJob)  │
-            └───────────────┘  └──────┬────────────────┘
-                                      │
-                          send email  │  store mapping
-                         ┌────────────┼────────────┐
-                         ▼            ▼            │
-                   ┌──────────┐  ┌─────────┐       │
-                   │ AWS SES  │  │ AWS S3   │◄──────┘
-                   └────┬─────┘  └────▲────┘
-                        │             │ raw emails
-              user      │             │
-              replies   ▼             │
-                   ┌──────────────────┴────┐
-                   │    Email Ingester     │
-                   │  (every 5min CronJob) │
-                   └──────────┬────────────┘
-                     publish  │
-                              ▼
-                   ┌──────────────────────┐
-                   │   Email Processor    │
-                   │    (Deployment)      │
-                   └──────────────────────┘
-                     republishes corrections
-                     → transactions.uncategorized
+```mermaid
+graph TD
+    Sheets[(Google Sheets)]
+
+    subgraph "Bookkeeper Agent (self-hosted)"
+        Producer["Producer\n(every 5min CronJob)"]
+        Writer["Writer\n(Deployment)"]
+        Categorizer["Categorizer\n(AI Agent)"]
+        DigestSender["Digest Sender\n(daily 7am CronJob)"]
+        EmailIngester["Email Ingester\n(every 5min CronJob)"]
+        EmailProcessor["Email Processor\n(Deployment)"]
+
+        subgraph Redpanda
+            uncategorized[transactions.uncategorized]
+            categorized[transactions.categorized]
+            emailInbox[email.inbox]
+            catFailed[transactions.categorization-failed]
+            writeFailed[transactions.write-failed]
+        end
+    end
+
+    subgraph AWS
+        SES[SES]
+        S3[S3]
+    end
+
+    Sheets -- read --> Producer
+    Producer -- publish --> uncategorized
+
+    uncategorized -- consume --> Categorizer
+    Categorizer -- publish --> categorized
+
+    categorized -- consume --> Writer
+    Writer -- write category --> Sheets
+
+    categorized -- consume --> DigestSender
+    DigestSender -- send email --> SES
+    DigestSender -- store mapping --> S3
+
+    SES -- user replies --> S3
+    S3 -- raw emails --> EmailIngester
+    EmailIngester -- publish --> emailInbox
+
+    emailInbox -- consume --> EmailProcessor
+    EmailProcessor -- republish corrections --> uncategorized
 ```
 
 ### Categorization Pipeline
