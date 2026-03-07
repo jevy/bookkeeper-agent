@@ -132,7 +132,9 @@ class CategoryWriter(
 
         // Write category and categorized date
         sheetsClient.writeCell("Transactions!${categoryCol}$rowNumber", category)
-        sheetsClient.writeCell("Transactions!${categorizedDateCol}$rowNumber", LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy")))
+        val categorizedDate = transaction.getCategorizationDate()?.toString()
+            ?: LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy"))
+        sheetsClient.writeCell("Transactions!${categorizedDateCol}$rowNumber", categorizedDate)
 
         // Write note if present
         val note = transaction.getNote()?.toString()

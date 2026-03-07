@@ -3,6 +3,8 @@ package org.jevy.bookkeeper.digest
 import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper_agent.Transaction
 import org.junit.jupiter.api.Test
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -25,11 +27,14 @@ class DigestSenderTest {
 
     private val sender = DigestSender(config)
 
+    private val dateFormat = DateTimeFormatter.ofPattern("M/d/yyyy")
+
     private fun makeTx(
         description: String = "COSTCO WHOLESAL",
         amount: String = "-\$384.91",
         category: String = "Groceries",
         transactionId: String = "txn-100",
+        categorizationDate: String? = null,
     ): Transaction = Transaction.newBuilder()
         .setTransactionId(transactionId)
         .setDate("3/1/2026")
@@ -37,6 +42,7 @@ class DigestSenderTest {
         .setCategory(category)
         .setAmount(amount)
         .setAccount("Visa")
+        .setCategorizationDate(categorizationDate)
         .build()
 
     @Test
@@ -78,5 +84,50 @@ class DigestSenderTest {
         val body = sender.formatDigestBody(emptyList())
         assertTrue(body.contains("Here are yesterday's categorizations:"))
         assertTrue(body.contains("To correct, reply with the number and your context:"))
+    }
+
+    @Test
+    fun `filterByCategorizationDate excludes transactions with old categorization date`() {
+        val targetDate = LocalDate.of(2026, 3, 6)
+        val transactions = listOf(
+            makeTx(transactionId = "txn-1", categorizationDate = "3/6/2026"),  // matches
+            makeTx(transactionId = "txn-2", categorizationDate = "3/4/2026"),  // old, excluded
+            makeTx(transactionId = "txn-3", categorizationDate = "3/5/2026"),  // old, excluded
+        )
+
+        val filtered = sender.filterByCategorizationDate(transactions, targetDate)
+
+        assertEquals(1, filtered.size)
+        assertEquals("txn-1", filtered[0].getTransactionId().toString())
+    }
+
+    @Test
+    fun `filterByCategorizationDate includes transactions with matching categorization date`() {
+        val targetDate = LocalDate.of(2026, 3, 6)
+        val transactions = listOf(
+            makeTx(transactionId = "txn-1", categorizationDate = "3/6/2026"),
+            makeTx(transactionId = "txn-2", categorizationDate = "3/6/2026"),
+        )
+
+        val filtered = sender.filterByCategorizationDate(transactions, targetDate)
+
+        assertEquals(2, filtered.size)
+    }
+
+    @Test
+    fun `filterByCategorizationDate includes transactions with null categorization date`() {
+        val targetDate = LocalDate.of(2026, 3, 6)
+        val transactions = listOf(
+            makeTx(transactionId = "txn-1", categorizationDate = null),        // null, included
+            makeTx(transactionId = "txn-2", categorizationDate = "3/6/2026"),  // matches, included
+            makeTx(transactionId = "txn-3", categorizationDate = "3/4/2026"),  // old, excluded
+        )
+
+        val filtered = sender.filterByCategorizationDate(transactions, targetDate)
+
+        assertEquals(2, filtered.size)
+        val ids = filtered.map { it.getTransactionId().toString() }
+        assertTrue(ids.contains("txn-1"))
+        assertTrue(ids.contains("txn-2"))
     }
 }

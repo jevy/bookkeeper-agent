@@ -39,6 +39,7 @@ object TransactionMapper {
             .setSource(col("Source"))
             .setDateAdded(col("Date Added"))
             .setOwner(owner)
+            .setCategorizationDate(col("Categorized Date"))
             .build()
     }
 }

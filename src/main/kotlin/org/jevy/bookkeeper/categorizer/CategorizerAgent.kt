@@ -26,6 +26,8 @@ import org.springframework.ai.model.tool.ToolCallingManager
 import org.springframework.retry.support.RetryTemplate
 import org.springframework.web.client.RestClient
 import java.time.Duration
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 
 class CategorizerAgent(
     private val config: AppConfig,
@@ -218,6 +220,7 @@ class CategorizerAgent(
                         val categorized = Transaction.newBuilder(transaction)
                             .setCategory(result!!.category)
                             .setCategoryJustification(result!!.justification)
+                            .setCategorizationDate(LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy")))
                             .build()
                         producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
                         logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result!!.category, result!!.justification)

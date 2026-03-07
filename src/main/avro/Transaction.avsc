@@ -19,6 +19,7 @@
     {"name": "note",             "type": ["null", "string"],  "default": null, "doc": "User notes"},
     {"name": "source",           "type": ["null", "string"],  "default": null, "doc": "Data source (e.g., Yodlee)"},
     {"name": "date_added",       "type": ["null", "string"],  "default": null, "doc": "When Tiller imported the transaction"},
-    {"name": "owner",            "type": ["null", "string"],  "default": null, "doc": "Google Sheet ID identifying the owner/tenant"}
+    {"name": "owner",            "type": ["null", "string"],  "default": null, "doc": "Google Sheet ID identifying the owner/tenant"},
+    {"name": "categorization_date", "type": ["null", "string"], "default": null, "doc": "Date the transaction was categorized (M/d/yyyy)"}
   ]
 }

@@ -100,10 +100,22 @@ class DigestSender(private val config: AppConfig) {
                 if (allDone) break
             }
 
-            logger.info("Read {} transactions from last 24h", transactions.size)
-            return transactions
+            logger.info("Read {} transactions from last 24h (pre-filter)", transactions.size)
+
+            val yesterday = LocalDate.now(ZoneId.of("UTC")).minusDays(1)
+            val filtered = filterByCategorizationDate(transactions, yesterday)
+            logger.info("Filtered to {} transactions with categorization_date = {} (or null)", filtered.size, yesterday)
+            return filtered
         } finally {
             consumer.close()
+        }
+    }
+
+    internal fun filterByCategorizationDate(transactions: List<Transaction>, targetDate: LocalDate): List<Transaction> {
+        val targetStr = targetDate.format(DateTimeFormatter.ofPattern("M/d/yyyy"))
+        return transactions.filter { txn ->
+            val catDate = txn.getCategorizationDate()?.toString()
+            catDate == null || catDate == targetStr
         }
     }
 
