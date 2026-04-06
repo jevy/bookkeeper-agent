@@ -101,16 +101,19 @@ class SpendingReportTest {
         assertEquals("COSTCO", txns[0].description)
         assertEquals("Groceries", txns[0].category)
         assertEquals(384.91, txns[0].amount, 0.01)
+        assertEquals(true, txns[0].isExpense)
     }
 
     @Test
-    fun `ignores positive amounts (income)`() {
+    fun `parses positive amounts as income`() {
         val rows = listOf(
             transactionHeader,
             makeRow("3/15/2026", "PAYCHECK", "Income", "\$5000.00"),
         )
         val txns = weeklyReport.parseTransactions(rows, emptySet())
-        assertEquals(0, txns.size)
+        assertEquals(1, txns.size)
+        assertEquals(false, txns[0].isExpense)
+        assertEquals(5000.0, txns[0].amount, 0.01)
     }
 
     @Test
@@ -172,7 +175,7 @@ class SpendingReportTest {
     fun `weekly report contains MTD header`() {
         val today = LocalDate.now()
         val txns = listOf(
-            SpendingReport.ParsedTransaction(today, 100.0, "Groceries", "COSTCO"),
+            SpendingReport.ParsedTransaction(isExpense = true, today, 100.0, "Groceries", "COSTCO"),
         )
         val html = weeklyReport.buildWeeklyReport(txns)
         val monthName = today.month.name.lowercase().replaceFirstChar { it.uppercase() }
@@ -184,8 +187,8 @@ class SpendingReportTest {
     fun `weekly report shows category breakdown`() {
         val today = LocalDate.now()
         val txns = listOf(
-            SpendingReport.ParsedTransaction(today, 100.0, "Groceries", "COSTCO"),
-            SpendingReport.ParsedTransaction(today, 50.0, "Restaurants", "TIM HORTONS"),
+            SpendingReport.ParsedTransaction(isExpense = true, today, 100.0, "Groceries", "COSTCO"),
+            SpendingReport.ParsedTransaction(isExpense = true, today, 50.0, "Restaurants", "TIM HORTONS"),
         )
         val html = weeklyReport.buildWeeklyReport(txns)
         assertTrue(html.contains("Groceries"))
@@ -200,8 +203,8 @@ class SpendingReportTest {
         val lastMonthName = lastMonthSameDay.month.name.lowercase().replaceFirstChar { it.uppercase() }
 
         val txns = listOf(
-            SpendingReport.ParsedTransaction(today, 200.0, "Groceries", "COSTCO"),
-            SpendingReport.ParsedTransaction(lastMonthSameDay, 150.0, "Groceries", "METRO"),
+            SpendingReport.ParsedTransaction(isExpense = true, today, 200.0, "Groceries", "COSTCO"),
+            SpendingReport.ParsedTransaction(isExpense = true, lastMonthSameDay, 150.0, "Groceries", "METRO"),
         )
         val html = weeklyReport.buildWeeklyReport(txns)
         // Should reference last month by name
@@ -212,8 +215,8 @@ class SpendingReportTest {
     fun `weekly report includes top expenses`() {
         val today = LocalDate.now()
         val txns = listOf(
-            SpendingReport.ParsedTransaction(today, 500.0, "Travel", "AIR CANADA"),
-            SpendingReport.ParsedTransaction(today, 100.0, "Groceries", "COSTCO"),
+            SpendingReport.ParsedTransaction(isExpense = true, today, 500.0, "Travel", "AIR CANADA"),
+            SpendingReport.ParsedTransaction(isExpense = true, today, 100.0, "Groceries", "COSTCO"),
         )
         val html = weeklyReport.buildWeeklyReport(txns)
         assertTrue(html.contains("Top 5 Expenses"))
@@ -236,7 +239,7 @@ class SpendingReportTest {
         val lastMonthName = lastMonth.month.name.lowercase().replaceFirstChar { it.uppercase() }
 
         val txns = listOf(
-            SpendingReport.ParsedTransaction(lastMonth.withDayOfMonth(15), 300.0, "Groceries", "COSTCO"),
+            SpendingReport.ParsedTransaction(isExpense = true, lastMonth.withDayOfMonth(15), 300.0, "Groceries", "COSTCO"),
         )
         val html = monthlyReport.buildMonthlyReport(txns)
         assertTrue(html.contains(lastMonthName))
@@ -247,7 +250,7 @@ class SpendingReportTest {
     fun `monthly report shows 6-month trend`() {
         val txns = (1L..6L).map { i ->
             val date = LocalDate.now().minusMonths(i).withDayOfMonth(15)
-            SpendingReport.ParsedTransaction(date, 1000.0 * i, "Groceries", "COSTCO")
+            SpendingReport.ParsedTransaction(isExpense = true, date, 1000.0 * i, "Groceries", "COSTCO")
         }
         val html = monthlyReport.buildMonthlyReport(txns)
         assertTrue(html.contains("6-Month Trend"))
@@ -258,10 +261,11 @@ class SpendingReportTest {
         val lastMonth = LocalDate.now().minusMonths(1)
         val txns = (1..12).map { i ->
             SpendingReport.ParsedTransaction(
-                lastMonth.withDayOfMonth(i.coerceAtMost(28)),
-                i * 100.0,
-                "Cat$i",
-                "Desc$i",
+                isExpense = true,
+                date = lastMonth.withDayOfMonth(i.coerceAtMost(28)),
+                amount = i * 100.0,
+                category = "Cat$i",
+                description = "Desc$i",
             )
         }
         val html = monthlyReport.buildMonthlyReport(txns)
@@ -276,8 +280,8 @@ class SpendingReportTest {
         val prevMonthName = prevMonth.month.name.lowercase().replaceFirstChar { it.uppercase() }
 
         val txns = listOf(
-            SpendingReport.ParsedTransaction(lastMonth, 500.0, "Groceries", "COSTCO"),
-            SpendingReport.ParsedTransaction(prevMonth, 400.0, "Groceries", "METRO"),
+            SpendingReport.ParsedTransaction(isExpense = true, lastMonth, 500.0, "Groceries", "COSTCO"),
+            SpendingReport.ParsedTransaction(isExpense = true, prevMonth, 400.0, "Groceries", "METRO"),
         )
         val html = monthlyReport.buildMonthlyReport(txns)
         assertTrue(html.contains("12-Month Average"))

@@ -23,6 +23,7 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
         val amount: Double,
         val category: String,
         val description: String,
+        val isExpense: Boolean,
     )
 
     fun run() {
@@ -114,10 +115,9 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
                 val date = LocalDate.parse(dateStr.trim(), dateFormatter)
                 val amount = parseAmount(amountStr)
 
-                // Only count expenses (negative amounts)
-                if (amount >= 0) return@mapNotNull null
+                if (amount == 0.0) return@mapNotNull null
 
-                ParsedTransaction(date, abs(amount), category, description)
+                ParsedTransaction(date, abs(amount), category, description, isExpense = amount < 0)
             } catch (e: Exception) {
                 null
             }
@@ -141,20 +141,34 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
         val lastMonthStart = lastMonthSameStart
         val lastMonthEnd = YearMonth.from(lastMonthStart).atEndOfMonth()
 
-        val mtdTxns = transactions.filter { it.date in mtdStart..today }
-        val lastMonthSameTxns = transactions.filter { it.date in lastMonthSameStart..lastMonthSameEnd }
-        val lastMonthAllTxns = transactions.filter { it.date in lastMonthStart..lastMonthEnd }
+        val mtdExpenses = transactions.filter { it.date in mtdStart..today && it.isExpense }
+        val mtdIncome = transactions.filter { it.date in mtdStart..today && !it.isExpense }
+        val lastMonthSameExpenses = transactions.filter { it.date in lastMonthSameStart..lastMonthSameEnd && it.isExpense }
+        val lastMonthSameIncome = transactions.filter { it.date in lastMonthSameStart..lastMonthSameEnd && !it.isExpense }
+        val lastMonthAllExpenses = transactions.filter { it.date in lastMonthStart..lastMonthEnd && it.isExpense }
+        val lastMonthAllIncome = transactions.filter { it.date in lastMonthStart..lastMonthEnd && !it.isExpense }
 
         val twelveMonthsAgo = today.minusMonths(12).withDayOfMonth(1)
         val lastMonthEndDate = mtdStart.minusDays(1)
-        val trailing12Txns = transactions.filter { it.date in twelveMonthsAgo..lastMonthEndDate }
+        val trailing12 = transactions.filter { it.date in twelveMonthsAgo..lastMonthEndDate }
 
-        val mtdTotal = mtdTxns.sumOf { it.amount }
-        val lastSameTotal = lastMonthSameTxns.sumOf { it.amount }
-        val lastFinalTotal = lastMonthAllTxns.sumOf { it.amount }
-        val avg12m = if (trailing12Txns.isNotEmpty()) {
-            trailing12Txns.sumOf { it.amount } / 12.0
-        } else 0.0
+        val mtdExp = mtdExpenses.sumOf { it.amount }
+        val mtdInc = mtdIncome.sumOf { it.amount }
+        val mtdNet = mtdInc - mtdExp
+        val lastSameExp = lastMonthSameExpenses.sumOf { it.amount }
+        val lastSameInc = lastMonthSameIncome.sumOf { it.amount }
+        val lastSameNet = lastSameInc - lastSameExp
+        val lastFinalExp = lastMonthAllExpenses.sumOf { it.amount }
+        val lastFinalInc = lastMonthAllIncome.sumOf { it.amount }
+        val lastFinalNet = lastFinalInc - lastFinalExp
+        val avg12mExp = trailing12.filter { it.isExpense }.sumOf { it.amount } / 12.0
+        val avg12mInc = trailing12.filter { !it.isExpense }.sumOf { it.amount } / 12.0
+        val avg12mNet = avg12mInc - avg12mExp
+
+        // For category breakdown, use expenses only
+        val mtdTxns = mtdExpenses
+        val lastMonthSameTxns = lastMonthSameExpenses
+        val lastMonthAllTxns = lastMonthAllExpenses
 
         // Category breakdown
         val allCategories = (mtdTxns.map { it.category } +
@@ -192,25 +206,33 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
                 <div style="background:#161b22;border-radius:8px;border:1px solid #2d333b;padding:20px;margin-bottom:16px;">
                     <h2 style="color:#f0f3f6;margin:0 0 16px 0;font-size:18px;">Summary</h2>
                     <table style="width:100%;border-collapse:collapse;">
-                        <tr>
-                            <td style="padding:8px 12px;color:#768390;">MTD Spend (Day $dayOfMonth)</td>
-                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;font-weight:bold;">${formatCurrency(mtdTotal)}</td>
+                        <tr style="border-bottom:1px solid #2d333b;">
+                            <td style="padding:8px 12px;color:#768390;"></td>
+                            <td style="padding:8px 12px;color:#768390;text-align:right;font-size:12px;">MTD (Day $dayOfMonth)</td>
+                            <td style="padding:8px 12px;color:#768390;text-align:right;font-size:12px;">$lastMonthName 1-$dayOfMonth</td>
+                            <td style="padding:8px 12px;color:#768390;text-align:right;font-size:12px;">$lastMonthName Final</td>
+                            <td style="padding:8px 12px;color:#768390;text-align:right;font-size:12px;">12M Avg</td>
                         </tr>
                         <tr>
-                            <td style="padding:8px 12px;color:#768390;">$lastMonthName (Day 1-$dayOfMonth)</td>
-                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;">${formatCurrency(lastSameTotal)}</td>
+                            <td style="padding:8px 12px;color:#768390;">Expenses</td>
+                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;font-weight:bold;">${formatCurrency(mtdExp)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;">${formatCurrencyWithPct(lastSameExp, mtdExp)}</td>
+                            <td style="padding:8px 12px;color:#768390;font-family:monospace;text-align:right;">${formatCurrency(lastFinalExp)}</td>
+                            <td style="padding:8px 12px;color:#768390;font-family:monospace;text-align:right;">${formatCurrency(avg12mExp)}</td>
                         </tr>
                         <tr>
-                            <td style="padding:8px 12px;color:#768390;">$lastMonthName Final</td>
-                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;">${formatCurrency(lastFinalTotal)}</td>
+                            <td style="padding:8px 12px;color:#768390;">Income</td>
+                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;font-weight:bold;">${formatCurrency(mtdInc)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;">${formatCurrencyWithPct(lastSameInc, mtdInc, incomeMode = true)}</td>
+                            <td style="padding:8px 12px;color:#768390;font-family:monospace;text-align:right;">${formatCurrency(lastFinalInc)}</td>
+                            <td style="padding:8px 12px;color:#768390;font-family:monospace;text-align:right;">${formatCurrency(avg12mInc)}</td>
                         </tr>
-                        <tr>
-                            <td style="padding:8px 12px;color:#768390;">12-Month Average</td>
-                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;">${formatCurrency(avg12m)}</td>
-                        </tr>
-                        <tr>
-                            <td style="padding:8px 12px;color:#768390;">vs $lastMonthName Same Period</td>
-                            <td style="padding:8px 12px;font-family:monospace;text-align:right;${pctStyle(mtdTotal, lastSameTotal)}">${formatPctChange(mtdTotal, lastSameTotal)}</td>
+                        <tr style="border-top:1px solid #2d333b;">
+                            <td style="padding:8px 12px;color:#768390;font-weight:bold;">Net</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;font-weight:bold;${netStyle(mtdNet)}">${formatSignedCurrency(mtdNet)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;${netStyle(lastSameNet)}">${formatSignedCurrency(lastSameNet)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;${netStyle(lastFinalNet)}">${formatSignedCurrency(lastFinalNet)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;${netStyle(avg12mNet)}">${formatSignedCurrency(avg12mNet)}</td>
                         </tr>
                     </table>
                 </div>
@@ -296,23 +318,29 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
         val prevMonthStart = prevMonth.atDay(1)
         val prevMonthEnd = prevMonth.atEndOfMonth()
 
-        val lastMonthTxns = transactions.filter { it.date in lastMonthStart..lastMonthEnd }
-        val prevMonthTxns = transactions.filter { it.date in prevMonthStart..prevMonthEnd }
+        val lastMonthAll = transactions.filter { it.date in lastMonthStart..lastMonthEnd }
+        val prevMonthAll = transactions.filter { it.date in prevMonthStart..prevMonthEnd }
 
         val twelveMonthsAgo = lastMonthStart.minusMonths(12)
         val trailing12End = prevMonthEnd
-        val trailing12Txns = transactions.filter { it.date in twelveMonthsAgo..trailing12End }
+        val trailing12All = transactions.filter { it.date in twelveMonthsAgo..trailing12End }
 
-        val thisTotal = lastMonthTxns.sumOf { it.amount }
-        val prevTotal = prevMonthTxns.sumOf { it.amount }
-        val avg12m = if (trailing12Txns.isNotEmpty()) {
-            trailing12Txns.sumOf { it.amount } / 12.0
-        } else 0.0
+        val thisExp = lastMonthAll.filter { it.isExpense }.sumOf { it.amount }
+        val thisInc = lastMonthAll.filter { !it.isExpense }.sumOf { it.amount }
+        val thisNet = thisInc - thisExp
+        val prevExp = prevMonthAll.filter { it.isExpense }.sumOf { it.amount }
+        val prevInc = prevMonthAll.filter { !it.isExpense }.sumOf { it.amount }
+        val prevNet = prevInc - prevExp
+        val avg12mExp = trailing12All.filter { it.isExpense }.sumOf { it.amount } / 12.0
+        val avg12mInc = trailing12All.filter { !it.isExpense }.sumOf { it.amount } / 12.0
+        val avg12mNet = avg12mInc - avg12mExp
 
-        // Income: positive amounts in the same period (re-read from all transactions, not just expenses)
-        // Note: we only have expenses here (negative filtered), so income is not available from parsed data.
-        // We'll show 0 for income since we only parsed expenses.
-        val pctVsAvg = if (avg12m > 0) ((thisTotal - avg12m) / avg12m) * 100.0 else 0.0
+        // For category breakdown, expenses only
+        val lastMonthTxns = lastMonthAll.filter { it.isExpense }
+        val prevMonthTxns = prevMonthAll.filter { it.isExpense }
+        val trailing12Txns = trailing12All.filter { it.isExpense }
+
+        val pctVsAvg = if (avg12mExp > 0) ((thisExp - avg12mExp) / avg12mExp) * 100.0 else 0.0
 
         // 6-month trend
         data class MonthTotal(val label: String, val total: Double)
@@ -321,7 +349,7 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
             val ym = lastMonth.minusMonths(i.toLong())
             val start = ym.atDay(1)
             val end = ym.atEndOfMonth()
-            val total = transactions.filter { it.date in start..end }.sumOf { it.amount }
+            val total = transactions.filter { it.date in start..end && it.isExpense }.sumOf { it.amount }
             MonthTotal(ym.format(DateTimeFormatter.ofPattern("MMM")), total)
         }
         val maxTrend = trends.maxOfOrNull { it.total } ?: 1.0
@@ -348,7 +376,7 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
             if (thisMo < 5.0 && prevMo < 5.0 && catAvg < 5.0) return@mapNotNull null
 
             val pct = if (catAvg > 0) ((thisMo - catAvg) / catAvg) * 100.0 else null
-            val proportion = if (thisTotal > 0) (thisMo / thisTotal) * 100.0 else 0.0
+            val proportion = if (thisExp > 0) (thisMo / thisExp) * 100.0 else 0.0
             CatRow(cat.ifBlank { "Uncategorized" }, thisMo, prevMo, catAvg, pct, proportion)
         }.sortedByDescending { it.thisMonth }.take(18)
 
@@ -364,21 +392,29 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
                 <div style="background:#161b22;border-radius:8px;border:1px solid #2d333b;padding:20px;margin-bottom:16px;">
                     <h2 style="color:#f0f3f6;margin:0 0 16px 0;font-size:18px;">Summary</h2>
                     <table style="width:100%;border-collapse:collapse;">
-                        <tr>
-                            <td style="padding:8px 12px;color:#768390;">Total Spent</td>
-                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;font-weight:bold;">${formatCurrency(thisTotal)}</td>
+                        <tr style="border-bottom:1px solid #2d333b;">
+                            <td style="padding:8px 12px;color:#768390;"></td>
+                            <td style="padding:8px 12px;color:#768390;text-align:right;font-size:12px;">$lastMonthName</td>
+                            <td style="padding:8px 12px;color:#768390;text-align:right;font-size:12px;">$prevMonthName</td>
+                            <td style="padding:8px 12px;color:#768390;text-align:right;font-size:12px;">12M Avg</td>
                         </tr>
                         <tr>
-                            <td style="padding:8px 12px;color:#768390;">$prevMonthName Total</td>
-                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;">${formatCurrency(prevTotal)}</td>
+                            <td style="padding:8px 12px;color:#768390;">Expenses</td>
+                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;font-weight:bold;">${formatCurrency(thisExp)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;">${formatCurrencyWithPct(prevExp, thisExp)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;">${formatCurrencyWithPct(avg12mExp, thisExp)}</td>
                         </tr>
                         <tr>
-                            <td style="padding:8px 12px;color:#768390;">12-Month Average</td>
-                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;">${formatCurrency(avg12m)}</td>
+                            <td style="padding:8px 12px;color:#768390;">Income</td>
+                            <td style="padding:8px 12px;color:#f0f3f6;font-family:monospace;text-align:right;font-weight:bold;">${formatCurrency(thisInc)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;">${formatCurrencyWithPct(prevInc, thisInc, incomeMode = true)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;">${formatCurrencyWithPct(avg12mInc, thisInc, incomeMode = true)}</td>
                         </tr>
-                        <tr>
-                            <td style="padding:8px 12px;color:#768390;">vs 12M Average</td>
-                            <td style="padding:8px 12px;font-family:monospace;text-align:right;${spendingPctStyle(pctVsAvg)}">${"%+.1f".format(pctVsAvg)}%</td>
+                        <tr style="border-top:1px solid #2d333b;">
+                            <td style="padding:8px 12px;color:#768390;font-weight:bold;">Net</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;font-weight:bold;${netStyle(thisNet)}">${formatSignedCurrency(thisNet)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;${netStyle(prevNet)}">${formatSignedCurrency(prevNet)}</td>
+                            <td style="padding:8px 12px;font-family:monospace;text-align:right;${netStyle(avg12mNet)}">${formatSignedCurrency(avg12mNet)}</td>
                         </tr>
                     </table>
                 </div>
@@ -545,7 +581,41 @@ class SpendingReport(private val config: AppConfig, private val mode: String) {
     """.trimIndent()
 
     private fun formatCurrency(amount: Double): String {
-        return "$%,.2f".format(amount)
+        return "$%,.0f".format(amount)
+    }
+
+    /**
+     * Formats a comparison value with an inline percentage vs the current value.
+     * For expenses: spending up = red, down = green.
+     * For income: income up = green, down = red.
+     */
+    private fun formatCurrencyWithPct(comparisonVal: Double, currentVal: Double, incomeMode: Boolean = false): String {
+        if (comparisonVal == 0.0 && currentVal == 0.0) return """<span style="color:#768390;">—</span>"""
+        val pct = if (comparisonVal > 0) ((currentVal - comparisonVal) / comparisonVal) * 100.0 else null
+        val pctHtml = if (pct != null) {
+            val color = if (incomeMode) {
+                // Income: more is green, less is red
+                if (pct >= 0) "#3fb950" else "#f85149"
+            } else {
+                // Expenses: more is red, less is green
+                when {
+                    pct > 10 -> "#f85149"
+                    pct > 0 -> "#d29a28"
+                    else -> "#3fb950"
+                }
+            }
+            """ <span style="color:$color;font-size:11px;">${"%+.0f".format(pct)}%</span>"""
+        } else ""
+        return """<span style="color:#e1e4e8;">${formatCurrency(comparisonVal)}</span>$pctHtml"""
+    }
+
+    private fun formatSignedCurrency(amount: Double): String {
+        val sign = if (amount >= 0) "+" else "-"
+        return "$sign$${"%,.0f".format(abs(amount))}"
+    }
+
+    private fun netStyle(amount: Double): String {
+        return if (amount >= 0) "color:#3fb950;" else "color:#f85149;"
     }
 
     private fun formatPctChange(current: Double, previous: Double): String {
