@@ -284,7 +284,7 @@ class SpendingReportTest {
             SpendingReport.ParsedTransaction(prevMonth, 400.0, "Groceries", "METRO", isExpense = true),
         )
         val html = monthlyReport.buildMonthlyReport(txns)
-        assertTrue(html.contains("12-Month Average"))
+        assertTrue(html.contains("12M Avg"))
         assertTrue(html.contains(prevMonthName))
     }
 
