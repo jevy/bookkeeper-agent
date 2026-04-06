@@ -16,6 +16,7 @@ data class AppConfig(
     val s3Bucket: String = "",
     val sesFromAddress: String = "",
     val digestToAddress: String = "",
+    val reportToAddresses: String = "",
 ) {
     companion object {
         fun fromEnv(): AppConfig = AppConfig(
@@ -34,6 +35,7 @@ data class AppConfig(
             s3Bucket = System.getenv("S3_BUCKET") ?: "",
             sesFromAddress = System.getenv("SES_FROM_ADDRESS") ?: "",
             digestToAddress = System.getenv("DIGEST_TO_ADDRESS") ?: "",
+            reportToAddresses = System.getenv("REPORT_TO_ADDRESSES") ?: "",
         )
 
         private fun requireEnv(name: String): String =

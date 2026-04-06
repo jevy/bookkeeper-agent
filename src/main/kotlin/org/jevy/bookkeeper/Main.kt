@@ -8,6 +8,7 @@ import org.jevy.bookkeeper.digest.EmailProcessor
 import org.jevy.bookkeeper.kafka.TopicInitializer
 import org.jevy.bookkeeper.metrics.Metrics
 import org.jevy.bookkeeper.producer.TransactionProducer
+import org.jevy.bookkeeper.report.SpendingReport
 import org.jevy.bookkeeper.replay.DlqReplayer
 import org.jevy.bookkeeper.writer.CategoryWriter
 import org.slf4j.LoggerFactory
@@ -16,7 +17,7 @@ private val logger = LoggerFactory.getLogger("org.jevy.bookkeeper.Main")
 
 fun main(args: Array<String>) {
     val command = args.firstOrNull() ?: run {
-        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor>")
+        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
         System.exit(1)
         return
     }
@@ -90,9 +91,19 @@ fun main(args: Array<String>) {
                 onAlive = Metrics::setConsumerAlive,
             )
         }
+        "weekly-report" -> {
+            val config = AppConfig.fromEnv()
+            logger.info("Starting Weekly Report")
+            SpendingReport(config, "weekly").run()
+        }
+        "monthly-report" -> {
+            val config = AppConfig.fromEnv()
+            logger.info("Starting Monthly Report")
+            SpendingReport(config, "monthly").run()
+        }
         else -> {
             System.err.println("Unknown command: $command")
-            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor>")
+            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
             System.exit(1)
         }
     }
