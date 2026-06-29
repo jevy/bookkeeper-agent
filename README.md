@@ -197,6 +197,38 @@ kubectl apply -k k8s/
 
 You'll need to create a `bookkeeper` Secret in your namespace with the required API keys and credentials.
 
+## TypeStream Pipelines
+
+The `pipelines/` directory contains TypeStream pipeline definitions that create materialized views over the Kafka topics. These views power the Grafana metrics (uncategorized count, DLQ counts) via a cronjob that queries TypeStream's gRPC `StateQueryService` and pushes to Prometheus Pushgateway.
+
+**Pipelines must be re-applied after a Redpanda data wipe** (they're stored in a Kafka compacted topic).
+
+Apply all pipelines via `grpcurl` (from any pod with network access, e.g. `netshoot`):
+
+```bash
+# Port-forward TypeStream gRPC
+kubectl port-forward svc/typestream-server -n apps 4242:4242 &
+
+# Apply each pipeline
+for f in pipelines/*.typestream.json; do
+  NAME=$(jq -r .name "$f")
+  VERSION=$(jq -r .version "$f")
+  DESC=$(jq -r .description "$f")
+  GRAPH=$(jq .graph "$f")
+
+  grpcurl -plaintext -d "$(jq -n \
+    --arg name "$NAME" \
+    --arg version "$VERSION" \
+    --arg desc "$DESC" \
+    --argjson graph "$GRAPH" \
+    '{metadata: {name: $name, version: $version, description: $desc}, graph: $graph}')" \
+    localhost:4242 io.typestream.grpc.PipelineService/ApplyPipeline
+done
+
+# Verify
+grpcurl -plaintext localhost:4242 io.typestream.grpc.PipelineService/ListPipelines
+```
+
 ## Building
 
 Requires JDK 21.

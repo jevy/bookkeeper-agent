@@ -222,7 +222,11 @@ class CategorizerAgent(
                             .setCategoryJustification(result!!.justification)
                             .setCategorizationDate(LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy")))
                             .build()
-                        producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
+                        val categorizedKey = categorized.getTransactionId().toString()
+                        producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorizedKey, categorized))
+                        // Outbox: signal "needs digesting". Re-categorization re-writes the key,
+                        // re-queuing the txn so the corrected category gets re-sent.
+                        producer.send(ProducerRecord(TopicNames.PENDING_DIGEST, categorizedKey, categorized))
                         logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result!!.category, result!!.justification)
                         if (result!!.category.equals("Unknown", ignoreCase = true)) unknownCounter.increment()
                         else categorizedCounter.increment()
