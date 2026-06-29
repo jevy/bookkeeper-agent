@@ -39,6 +39,17 @@ object TopicInitializer {
             config = mapOf(TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT),
         ),
         TopicSpec(
+            // Digest outbox: categorizer writes "needs digesting", digest writes a tombstone
+            // after a confirmed send. delete.retention.ms is long (7d) so the compacted view
+            // converges before tombstones are removed.
+            name = TopicNames.PENDING_DIGEST,
+            config = mapOf(
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.DELETE_RETENTION_MS_CONFIG to "604800000", // tombstones retained 7d
+            ),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
+        ),
+        TopicSpec(
             name = TopicNames.CATEGORIZATION_FAILED,
             config = mapOf(
                 TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,

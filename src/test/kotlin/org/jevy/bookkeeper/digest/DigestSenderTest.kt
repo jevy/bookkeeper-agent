@@ -1,10 +1,18 @@
 package org.jevy.bookkeeper.digest
 
+import io.mockk.every
+import io.mockk.mockk
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.clients.consumer.ConsumerRecords
+import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.common.Node
+import org.apache.kafka.common.PartitionInfo
+import org.apache.kafka.common.TopicPartition
 import org.jevy.bookkeeper.config.AppConfig
+import org.jevy.bookkeeper.kafka.TopicNames
 import org.jevy.bookkeeper_agent.Transaction
 import org.junit.jupiter.api.Test
-import java.time.LocalDate
-import java.time.format.DateTimeFormatter
+import java.time.Duration
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -26,8 +34,6 @@ class DigestSenderTest {
     )
 
     private val sender = DigestSender(config)
-
-    private val dateFormat = DateTimeFormatter.ofPattern("M/d/yyyy")
 
     private fun makeTx(
         description: String = "COSTCO WHOLESAL",
@@ -82,52 +88,102 @@ class DigestSenderTest {
     @Test
     fun `formatDigestBody handles empty transactions`() {
         val body = sender.formatDigestBody(emptyList())
-        assertTrue(body.contains("Here are yesterday's categorizations:"))
+        assertTrue(body.contains("Here are your pending categorizations:"))
         assertTrue(body.contains("To correct, reply with the number and your context:"))
     }
 
     @Test
-    fun `filterByCategorizationDate excludes transactions with old categorization date`() {
-        val targetDate = LocalDate.of(2026, 3, 6)
-        val transactions = listOf(
-            makeTx(transactionId = "txn-1", categorizationDate = "3/6/2026"),  // matches
-            makeTx(transactionId = "txn-2", categorizationDate = "3/4/2026"),  // old, excluded
-            makeTx(transactionId = "txn-3", categorizationDate = "3/5/2026"),  // old, excluded
-        )
+    fun `collapseToLatest keeps latest non-null value per key`() {
+        val v1 = makeTx(transactionId = "txn-1", category = "Groceries")
+        val v2 = makeTx(transactionId = "txn-1", category = "Household")
+        val other = makeTx(transactionId = "txn-2", category = "Gas")
 
-        val filtered = sender.filterByCategorizationDate(transactions, targetDate)
+        val result = sender.collapseToLatest(listOf("txn-1" to v1, "txn-2" to other, "txn-1" to v2))
 
-        assertEquals(1, filtered.size)
-        assertEquals("txn-1", filtered[0].getTransactionId().toString())
+        assertEquals(2, result.size)
+        val byId = result.associateBy { it.getTransactionId().toString() }
+        // re-categorization wins: latest value for txn-1 is Household
+        assertEquals("Household", byId["txn-1"]?.getCategory()?.toString())
+        assertEquals("Gas", byId["txn-2"]?.getCategory()?.toString())
     }
 
     @Test
-    fun `filterByCategorizationDate includes transactions with matching categorization date`() {
-        val targetDate = LocalDate.of(2026, 3, 6)
-        val transactions = listOf(
-            makeTx(transactionId = "txn-1", categorizationDate = "3/6/2026"),
-            makeTx(transactionId = "txn-2", categorizationDate = "3/6/2026"),
-        )
+    fun `collapseToLatest excludes tombstoned keys (idempotency after send)`() {
+        val v1 = makeTx(transactionId = "txn-1")
+        val v2 = makeTx(transactionId = "txn-2")
 
-        val filtered = sender.filterByCategorizationDate(transactions, targetDate)
+        // txn-1 was digested then tombstoned; txn-2 still pending
+        val result = sender.collapseToLatest(listOf("txn-1" to v1, "txn-2" to v2, "txn-1" to null))
 
-        assertEquals(2, filtered.size)
+        assertEquals(1, result.size)
+        assertEquals("txn-2", result[0].getTransactionId().toString())
     }
 
     @Test
-    fun `filterByCategorizationDate includes transactions with null categorization date`() {
-        val targetDate = LocalDate.of(2026, 3, 6)
-        val transactions = listOf(
-            makeTx(transactionId = "txn-1", categorizationDate = null),        // null, included
-            makeTx(transactionId = "txn-2", categorizationDate = "3/6/2026"),  // matches, included
-            makeTx(transactionId = "txn-3", categorizationDate = "3/4/2026"),  // old, excluded
+    fun `collapseToLatest re-includes a re-categorized key after its tombstone`() {
+        val original = makeTx(transactionId = "txn-1", category = "Groceries")
+        val corrected = makeTx(transactionId = "txn-1", category = "Household")
+
+        // sent (categorized) -> tombstoned -> re-categorized with correction
+        val result = sender.collapseToLatest(
+            listOf("txn-1" to original, "txn-1" to null, "txn-1" to corrected),
         )
 
-        val filtered = sender.filterByCategorizationDate(transactions, targetDate)
+        assertEquals(1, result.size)
+        assertEquals("Household", result[0].getCategory()?.toString())
+    }
 
-        assertEquals(2, filtered.size)
-        val ids = filtered.map { it.getTransactionId().toString() }
-        assertTrue(ids.contains("txn-1"))
-        assertTrue(ids.contains("txn-2"))
+    @Test
+    fun `collapseToLatest preserves first-seen order`() {
+        val a = makeTx(transactionId = "txn-a")
+        val b = makeTx(transactionId = "txn-b")
+        val c = makeTx(transactionId = "txn-c")
+
+        val result = sender.collapseToLatest(listOf("txn-a" to a, "txn-b" to b, "txn-c" to c, "txn-a" to a))
+
+        assertEquals(listOf("txn-a", "txn-b", "txn-c"), result.map { it.getTransactionId().toString() })
+    }
+
+    @Test
+    fun `readPendingDigest reads the whole topic regardless of categorization date`() {
+        // Regression: a txn categorized in the 00:00-07:00 dead zone (any date) must still appear.
+        val tp = TopicPartition(TopicNames.PENDING_DIGEST, 0)
+        val consumer = mockk<KafkaConsumer<String, Transaction>>(relaxed = true)
+        every { consumer.partitionsFor(TopicNames.PENDING_DIGEST) } returns
+            listOf(PartitionInfo(TopicNames.PENDING_DIGEST, 0, Node.noNode(), emptyArray(), emptyArray()))
+        every { consumer.endOffsets(any()) } returns mapOf(tp to 2L)
+
+        // A categorization with an "old" date that the previous date-filter would have dropped,
+        // plus a tombstoned key that must be excluded.
+        val deadZoneTx = makeTx(transactionId = "txn-deadzone", categorizationDate = "1/1/2020")
+        val sentTx = makeTx(transactionId = "txn-sent")
+        val records = ConsumerRecords(
+            mapOf(
+                tp to listOf(
+                    ConsumerRecord(TopicNames.PENDING_DIGEST, 0, 0L, "txn-deadzone", deadZoneTx),
+                    ConsumerRecord(TopicNames.PENDING_DIGEST, 0, 1L, "txn-sent", sentTx),
+                    ConsumerRecord<String, Transaction>(TopicNames.PENDING_DIGEST, 0, 2L, "txn-sent", null),
+                ),
+            ),
+        )
+        var pollCount = 0
+        every { consumer.poll(any<Duration>()) } answers {
+            pollCount++
+            if (pollCount == 1) records else ConsumerRecords(emptyMap())
+        }
+        every { consumer.position(any()) } answers { if (pollCount > 0) 2L else 0L }
+
+        val pending = sender.readPendingDigest(consumer)
+
+        assertEquals(1, pending.size)
+        assertEquals("txn-deadzone", pending[0].getTransactionId().toString())
+    }
+
+    @Test
+    fun `readPendingDigest returns empty when topic has no partitions`() {
+        val consumer = mockk<KafkaConsumer<String, Transaction>>(relaxed = true)
+        every { consumer.partitionsFor(TopicNames.PENDING_DIGEST) } returns null
+
+        assertEquals(emptyList(), sender.readPendingDigest(consumer))
     }
 }

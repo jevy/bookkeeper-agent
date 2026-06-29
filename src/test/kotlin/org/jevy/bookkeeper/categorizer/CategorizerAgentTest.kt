@@ -233,6 +233,8 @@ class CategorizerAgentTest {
         verify { tombstoneProducer.send(match { it.topic() == TopicNames.UNCATEGORIZED && it.value() == null }) }
         // tx2 categorized successfully
         verify { producer.send(match { it.topic() == TopicNames.CATEGORIZED }) }
+        // and enqueued to the digest outbox under the same key
+        verify { producer.send(match { it.topic() == TopicNames.PENDING_DIGEST && it.key() == "txn-2" }) }
         verify(atLeast = 1) { consumer.commitSync() }
     }
 

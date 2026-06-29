@@ -6,9 +6,11 @@ import io.confluent.kafka.serializers.KafkaAvroDeserializer
 import io.confluent.kafka.serializers.KafkaAvroDeserializerConfig
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.jevy.bookkeeper.config.AppConfig
+import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
 import org.jevy.bookkeeper_agent.Transaction
 import org.slf4j.LoggerFactory
@@ -19,9 +21,7 @@ import software.amazon.awssdk.core.sync.RequestBody
 import software.amazon.awssdk.services.ses.SesClient
 import software.amazon.awssdk.services.ses.model.*
 import java.time.Duration
-import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 
@@ -32,10 +32,10 @@ class DigestSender(private val config: AppConfig) {
     private val dateFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy")
 
     fun run() {
-        val transactions = readLast24hTransactions()
+        val transactions = readPendingDigest()
 
         if (transactions.isEmpty()) {
-            logger.info("No transactions in the last 24h, skipping digest email")
+            logger.info("No pending categorizations, skipping digest email")
             return
         }
 
@@ -55,13 +55,25 @@ class DigestSender(private val config: AppConfig) {
         val body = formatDigestBody(transactions)
         sendEmail(subject, body)
 
+        // At-least-once: email first, then tombstone the sent ids so the next run skips them.
+        // A crash between send and tombstone re-sends next run (safe), never silently drops.
+        tombstoneSent(transactions)
+
         logger.info("Sent digest email with {} transactions for {}", transactions.size, dateStr)
     }
 
-    internal fun readLast24hTransactions(): List<Transaction> {
-        val consumer = createManualConsumer()
+    /**
+     * Reads the [TopicNames.PENDING_DIGEST] outbox from beginning to current end-offsets and
+     * returns the transactions still awaiting a digest — the latest non-null value per key.
+     * The topic is compacted, so reading to the end and collapsing per key reconstructs the
+     * "needs digesting" set: tombstones (null values, written after a confirmed send) drop their
+     * key. Date-independent and gap-free — unlike the old rolling-24h + categorization_date query.
+     */
+    internal fun readPendingDigest(
+        consumer: KafkaConsumer<String, Transaction> = createManualConsumer(),
+    ): List<Transaction> {
         try {
-            val topic = TopicNames.CATEGORIZED
+            val topic = TopicNames.PENDING_DIGEST
             val partitionInfos = consumer.partitionsFor(topic) ?: run {
                 logger.warn("No partitions found for topic {}", topic)
                 return emptyList()
@@ -69,30 +81,15 @@ class DigestSender(private val config: AppConfig) {
 
             val partitions = partitionInfos.map { TopicPartition(it.topic(), it.partition()) }
             consumer.assign(partitions)
-
-            // Seek to 24h ago using offsetsForTimes
-            val twentyFourHoursAgo = Instant.now().minus(Duration.ofHours(24)).toEpochMilli()
-            val timestampMap = partitions.associateWith { twentyFourHoursAgo }
-            val offsets = consumer.offsetsForTimes(timestampMap)
-
-            for (tp in partitions) {
-                val offsetAndTimestamp = offsets[tp]
-                if (offsetAndTimestamp != null) {
-                    consumer.seek(tp, offsetAndTimestamp.offset())
-                } else {
-                    // No messages after the timestamp on this partition — seek to end
-                    consumer.seekToEnd(listOf(tp))
-                }
-            }
-
+            consumer.seekToBeginning(partitions)
             val endOffsets = consumer.endOffsets(partitions)
-            val transactions = mutableListOf<Transaction>()
 
+            val records = mutableListOf<Pair<String, Transaction?>>()
             while (true) {
-                val records = consumer.poll(Duration.ofSeconds(2))
-                for (record in records) {
-                    val txn = record.value() ?: continue
-                    transactions.add(txn)
+                val polled = consumer.poll(Duration.ofSeconds(2))
+                for (record in polled) {
+                    val key = record.key() ?: continue
+                    records.add(key to record.value())
                 }
                 val allDone = partitions.all { tp ->
                     consumer.position(tp) >= (endOffsets[tp] ?: 0)
@@ -100,23 +97,35 @@ class DigestSender(private val config: AppConfig) {
                 if (allDone) break
             }
 
-            logger.info("Read {} transactions from last 24h (pre-filter)", transactions.size)
-
-            val yesterday = LocalDate.now(ZoneId.of("UTC")).minusDays(1)
-            val filtered = filterByCategorizationDate(transactions, yesterday)
-            logger.info("Filtered to {} transactions with categorization_date = {} (or null)", filtered.size, yesterday)
-            return filtered
+            val pending = collapseToLatest(records)
+            logger.info("Read {} pending-digest records, {} transactions still to send", records.size, pending.size)
+            return pending
         } finally {
             consumer.close()
         }
     }
 
-    internal fun filterByCategorizationDate(transactions: List<Transaction>, targetDate: LocalDate): List<Transaction> {
-        val targetStr = targetDate.format(DateTimeFormatter.ofPattern("M/d/yyyy"))
-        return transactions.filter { txn ->
-            val catDate = txn.getCategorizationDate()?.toString()
-            catDate == null || catDate == targetStr
+    /**
+     * Collapses a stream of (key, value) records to the latest non-null value per key, preserving
+     * first-seen order. A null value is a tombstone — its key is excluded from the result.
+     */
+    internal fun collapseToLatest(records: List<Pair<String, Transaction?>>): List<Transaction> {
+        val latest = LinkedHashMap<String, Transaction?>()
+        for ((key, value) in records) {
+            latest[key] = value
         }
+        return latest.values.filterNotNull()
+    }
+
+    private fun tombstoneSent(transactions: List<Transaction>) {
+        val producer = KafkaFactory.createTombstoneProducer(config)
+        producer.use { p ->
+            for (txn in transactions) {
+                p.send(ProducerRecord(TopicNames.PENDING_DIGEST, txn.getTransactionId().toString(), null))
+            }
+            p.flush()
+        }
+        logger.info("Tombstoned {} digested transactions in {}", transactions.size, TopicNames.PENDING_DIGEST)
     }
 
     private fun createManualConsumer(): KafkaConsumer<String, Transaction> {
@@ -143,7 +152,7 @@ class DigestSender(private val config: AppConfig) {
         }
 
         return buildString {
-            appendLine("Here are yesterday's categorizations:")
+            appendLine("Here are your pending categorizations:")
             appendLine()
             lines.forEach { appendLine(it) }
             appendLine()
