@@ -4,7 +4,7 @@
 
 **Goal:** Restructure the writer into a shared consumer loop with two independent sink modules (Sheets, Sure), then add the Sure sink so every categorization also lands in the self-hosted Sure instance.
 
-**Architecture:** `SinkWriter` owns the Kafka consume/commit/DLQ loop and is parameterised by a `CategorySink`. `SheetsSink` is the existing Sheets logic moved out of `CategoryWriter` unchanged. `SureSink` matches a Sheet transaction to a Sure transaction by account, date and amount, resolves the category name to a Sure id, and PATCHes it. Each sink runs as its own process with its own consumer group, so they fail independently.
+**Architecture:** `SinkWriter` owns the Kafka consume/commit/DLQ loop and is parameterised by a `CategorySink`. `SheetsSink` is the existing Sheets logic moved out of `CategoryWriter` unchanged; on success its loop publishes the record to a new `transactions.written` topic. `SureSink` consumes `transactions.written` (so Sure only ever mirrors what landed in the Sheet), matches the transaction to a Sure transaction by account, date and amount, resolves the category name to a Sure id, and PATCHes it. Each sink runs as its own process with its own consumer group, so they fail independently.
 
 **Tech Stack:** Kotlin 2.1 / JVM 21, Gradle, kafka-clients 3.9 with Confluent Avro serde, OkHttp 4.12, Gson 2.12, Micrometer, JUnit 5, MockK 1.13, OkHttp MockWebServer (new test dependency).
 
@@ -16,7 +16,9 @@
 - The Sheets writer keeps its command name `writer`, consumer group `category-writer`, DLQ topic `transactions.write-failed`, and metric prefix `bookkeeper.writer.`.
 - `src/test/kotlin/org/jevy/bookkeeper/writer/CategoryWriterTest.kt` passes with **no assertion changes**. Test-only shims in `CategoryWriter` are allowed.
 - The Sure sink never produces to `transactions.uncategorized`.
+- The Sure sink consumes `transactions.written`, never `transactions.categorized`.
 - The Sure sink never creates categories in Sure.
+- New topic `transactions.written`: `cleanup.policy=compact`, `retention.ms` in `deleteConfigs`.
 - Sure 5xx, timeout or connection failure must never result in a DLQ record or an offset commit.
 - All Sure API calls (GET and PATCH) are rate limited by `SURE_MAX_API_CALLS_PER_SEC`, default `5`.
 - Bounded Sure retries: 3 attempts, backoff 1s, 2s, total well under the 360 s `max.poll.interval.ms`.
@@ -43,7 +45,7 @@ Inputs the spec implies but that are easy to get wrong. Each has a pinning test 
 | File | Responsibility |
 |---|---|
 | `src/main/kotlin/org/jevy/bookkeeper/writer/CategorySink.kt` | `CategorySink` interface and `SinkResult` sealed type |
-| `src/main/kotlin/org/jevy/bookkeeper/writer/SinkWriter.kt` | Shared consumer loop: poll, dispatch on `SinkResult`, DLQ, optional tombstone, commit, metrics, health |
+| `src/main/kotlin/org/jevy/bookkeeper/writer/SinkWriter.kt` | Shared consumer loop: poll `sink.sourceTopic`, dispatch on `SinkResult`, DLQ, optional tombstone, optional publish-on-done, commit, metrics, health |
 | `src/main/kotlin/org/jevy/bookkeeper/writer/SheetsSink.kt` | Sheets logic moved from `CategoryWriter` (`writeCategory`, `findRow`) |
 | `src/main/kotlin/org/jevy/bookkeeper/writer/CategoryWriter.kt` | Thin wrapper: `SinkWriter(SheetsSink)` with tombstoning on. Keeps `run`, `writeCategory`, `findRow` for the existing test |
 | `src/main/kotlin/org/jevy/bookkeeper/sure/AmountConvention.kt` | Parse Sheet amount strings, convert to cents, flip sign for Sure query params |
@@ -52,8 +54,8 @@ Inputs the spec implies but that are easy to get wrong. Each has a pinning test 
 | `src/main/kotlin/org/jevy/bookkeeper/sure/TransactionMatcher.kt` | The rung ladder |
 | `src/main/kotlin/org/jevy/bookkeeper/sure/SureSink.kt` | Implements `CategorySink`: match, resolve, read-before-write, PATCH |
 | `src/main/kotlin/org/jevy/bookkeeper/config/AppConfig.kt` | New `sure*` fields and `SURE_ACCOUNT_MAP` parsing |
-| `src/main/kotlin/org/jevy/bookkeeper/kafka/TopicNames.kt`, `TopicInitializer.kt` | New DLQ topic, `CATEGORIZED` retention guard |
-| `src/main/kotlin/org/jevy/bookkeeper/replay/DlqReplayer.kt` | `sure` mode: `sure-write-failed` back to `categorized` unchanged |
+| `src/main/kotlin/org/jevy/bookkeeper/kafka/TopicNames.kt`, `TopicInitializer.kt` | New `written` and `sure-write-failed` topics, `CATEGORIZED` retention guard |
+| `src/main/kotlin/org/jevy/bookkeeper/replay/DlqReplayer.kt` | `sure` mode: `sure-write-failed` back to `written` unchanged |
 | `src/main/kotlin/org/jevy/bookkeeper/Main.kt` | `sure-writer` command, `dlq-replay sure` |
 | `k8s/app/deployment-sure-writer.yaml`, `kustomization.yaml`, `prometheusrule.yaml` | Deployment and alerts |
 | `pipelines/sure-write-failed-view.typestream.json` | DLQ materialized view |
@@ -73,13 +75,14 @@ Inputs the spec implies but that are easy to get wrong. Each has a pinning test 
   ```kotlin
   sealed interface SinkResult {
       object Written : SinkResult
-      data class Skipped(val reason: String) : SinkResult
+      data class Skipped(val reason: String, val landed: Boolean = false) : SinkResult   // landed: target already holds it
       data class Rejected(val reason: String, val cause: Throwable? = null) : SinkResult
       data class Unavailable(val cause: Throwable) : SinkResult
   }
   interface CategorySink {
       val name: String            // metric prefix segment: "writer" | "sure"
       val consumerGroup: String
+      val sourceTopic: String     // what this sink consumes
       val dlqTopic: String
       fun write(tx: Transaction): SinkResult
   }
@@ -89,6 +92,7 @@ Inputs the spec implies but that are easy to get wrong. Each has a pinning test 
       sink: CategorySink,
       meterRegistry: MeterRegistry = SimpleMeterRegistry(),
       tombstoneUncategorized: Boolean = false,
+      publishOnDone: String? = null,       // topic to republish the record to on Written / Skipped(landed)
   ) { fun run(onActivity: () -> Unit = {}, onAlive: (Boolean) -> Unit = {}) }
   ```
 
@@ -141,6 +145,7 @@ class SinkWriterTest {
     private class FakeSink(private val result: SinkResult) : CategorySink {
         override val name = "fake"
         override val consumerGroup = "fake-group"
+        override val sourceTopic = "fake.source"
         override val dlqTopic = "fake.dlq"
         val seen = mutableListOf<String>()
         override fun write(tx: Transaction): SinkResult {
@@ -166,8 +171,8 @@ class SinkWriterTest {
 
     /** First poll returns one record for [id]; second poll interrupts to stop the loop. */
     private fun pollOnce(id: String) {
-        val tp = TopicPartition(TopicNames.CATEGORIZED, 0)
-        val records = ConsumerRecords(mapOf(tp to listOf(ConsumerRecord(TopicNames.CATEGORIZED, 0, 0L, id, tx(id)))))
+        val tp = TopicPartition("fake.source", 0)
+        val records = ConsumerRecords(mapOf(tp to listOf(ConsumerRecord("fake.source", 0, 0L, id, tx(id)))))
         var polls = 0
         every { consumer.poll(any<Duration>()) } answers {
             polls++
@@ -239,14 +244,47 @@ class SinkWriterTest {
     }
 
     @Test
-    fun `subscribes with the sink consumer group and categorized topic`() {
+    fun `subscribes with the sink consumer group and source topic`() {
         pollOnce("txn-1")
         runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Written), registry), mutableListOf())
         verify { KafkaFactory.createConsumer(config, "fake-group") }
-        verify { consumer.subscribe(listOf(TopicNames.CATEGORIZED)) }
+        verify { consumer.subscribe(listOf("fake.source")) }
+    }
+
+    @Test
+    fun `publishOnDone republishes the record unchanged on Written`() {
+        pollOnce("txn-1")
+        runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Written), registry, publishOnDone = "next.topic"), mutableListOf())
+        verify(exactly = 1) { dlqProducer.send(match { it.topic() == "next.topic" && it.key() == "txn-1" && it.value()?.getCategory()?.toString() == "Groceries" }) }
+    }
+
+    @Test
+    fun `publishOnDone republishes on Skipped landed but not on Skipped not landed`() {
+        pollOnce("txn-1")
+        runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Skipped("already_categorized", landed = true)), registry, publishOnDone = "next.topic"), mutableListOf())
+        verify(exactly = 1) { dlqProducer.send(match { it.topic() == "next.topic" && it.key() == "txn-1" }) }
+
+        clearMocks(dlqProducer)
+        pollOnce("txn-2")
+        runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Skipped("no_category")), registry, publishOnDone = "next.topic"), mutableListOf())
+        verify(exactly = 0) { dlqProducer.send(any()) }
+    }
+
+    @Test
+    fun `publishOnDone never fires on Rejected and never fires when unset`() {
+        pollOnce("txn-1")
+        runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Rejected("no_match")), registry, publishOnDone = "next.topic"), mutableListOf())
+        verify(exactly = 0) { dlqProducer.send(match { it.topic() == "next.topic" }) }
+
+        clearMocks(dlqProducer)
+        pollOnce("txn-2")
+        runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Written), registry), mutableListOf())
+        verify(exactly = 0) { dlqProducer.send(any()) }
     }
 }
 ```
+
+The DLQ producer and the publish-on-done producer are the same Avro producer (`KafkaFactory.createProducer`), which is why `dlqProducer` sees both in the tests.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -269,7 +307,8 @@ import org.jevy.bookkeeper_agent.Transaction
  */
 sealed interface SinkResult {
     object Written : SinkResult
-    data class Skipped(val reason: String) : SinkResult
+    /** [landed] means the target already holds this category, so downstream may treat it as written. */
+    data class Skipped(val reason: String, val landed: Boolean = false) : SinkResult
     data class Rejected(val reason: String, val cause: Throwable? = null) : SinkResult
     data class Unavailable(val cause: Throwable) : SinkResult
 }
@@ -278,6 +317,8 @@ interface CategorySink {
     /** Metric prefix segment, e.g. "writer" gives bookkeeper.writer.* */
     val name: String
     val consumerGroup: String
+    /** The topic this sink consumes. Sheets reads categorized; Sure reads written. */
+    val sourceTopic: String
     val dlqTopic: String
     fun write(tx: Transaction): SinkResult
 }
@@ -303,18 +344,24 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 
 /**
- * Shared consumer loop for every category sink. Consumes transactions.categorized
+ * Shared consumer loop for every category sink. Consumes [CategorySink.sourceTopic]
  * with the sink's own consumer group and dispatches on [SinkResult].
  *
  * [tombstoneUncategorized] is true only for the Sheets sink: once the Sheet has
  * the category (or the record is in the DLQ), the transaction is done from the
  * pipeline's point of view and is removed from transactions.uncategorized.
+ *
+ * [publishOnDone], when set, republishes the record unchanged to that topic on
+ * Written and on Skipped(landed = true). The Sheets writer uses it to feed
+ * transactions.written, which is what the Sure writer consumes, so Sure only
+ * ever mirrors what actually landed in the Sheet.
  */
 class SinkWriter(
     private val config: AppConfig,
     private val sink: CategorySink,
     private val meterRegistry: MeterRegistry = SimpleMeterRegistry(),
     private val tombstoneUncategorized: Boolean = false,
+    private val publishOnDone: String? = null,
 ) {
     private val logger = LoggerFactory.getLogger("${SinkWriter::class.java.name}.${sink.name}")
 
@@ -334,9 +381,16 @@ class SinkWriter(
         val tombstoneProducer: KafkaProducer<String, ByteArray?>? =
             if (tombstoneUncategorized) KafkaFactory.createTombstoneProducer(config) else null
 
-        consumer.subscribe(listOf(TopicNames.CATEGORIZED))
-        logger.info("Sink '{}' subscribed to {} as group {}", sink.name, TopicNames.CATEGORIZED, sink.consumerGroup)
+        consumer.subscribe(listOf(sink.sourceTopic))
+        logger.info("Sink '{}' subscribed to {} as group {}", sink.name, sink.sourceTopic, sink.consumerGroup)
         onAlive(true)
+
+        fun publishDone(transactionId: String, value: org.jevy.bookkeeper_agent.Transaction) {
+            publishOnDone?.let { topic ->
+                dlqProducer.send(ProducerRecord(topic, transactionId, value))
+                logger.debug("Published transaction {} to {}", transactionId, topic)
+            }
+        }
 
         try {
             while (true) {
@@ -349,10 +403,12 @@ class SinkWriter(
                         is SinkResult.Written -> {
                             writtenCounter.increment()
                             tombstoneProducer?.tombstone(transactionId)
+                            publishDone(transactionId, record.value())
                         }
                         is SinkResult.Skipped -> {
                             skipped(result.reason)
                             logger.info("Skipped transaction {} ({})", transactionId, result.reason)
+                            if (result.landed) publishDone(transactionId, record.value())
                         }
                         is SinkResult.Rejected -> {
                             errorsCounter.increment()
@@ -385,7 +441,7 @@ class SinkWriter(
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `./gradlew test --tests 'org.jevy.bookkeeper.writer.SinkWriterTest' --console=plain`
-Expected: PASS, 6 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -451,6 +507,7 @@ class SheetsSink(
 
     override val name = "writer"
     override val consumerGroup = "category-writer"
+    override val sourceTopic = TopicNames.CATEGORIZED
     override val dlqTopic = TopicNames.WRITE_FAILED
 
     // Resolve column letters from header row on first use
@@ -510,7 +567,8 @@ class SheetsSink(
         val existing = rows.firstOrNull()?.firstOrNull()?.toString() ?: ""
         if (existing.isNotBlank() && existing == category) {
             logger.info("Transaction {} already has category '{}', skipping", transactionId, existing)
-            return SinkResult.Skipped("already_categorized")
+            // landed = true: the Sheet holds this category, so it still flows on to transactions.written
+            return SinkResult.Skipped("already_categorized", landed = true)
         }
 
         if (existing.isNotBlank() && existing != category) {
@@ -553,7 +611,14 @@ class SheetsSink(
 }
 ```
 
-- [ ] **Step 3: Replace `CategoryWriter` with the wrapper**
+- [ ] **Step 3: Add the `WRITTEN` topic name, then replace `CategoryWriter` with the wrapper**
+
+In `src/main/kotlin/org/jevy/bookkeeper/kafka/TopicNames.kt` add after `WRITE_FAILED`:
+
+```kotlin
+    /** Categorizations confirmed to be in the Sheet. Fed by the Sheets writer, consumed by the Sure writer. */
+    const val WRITTEN = "transactions.written"
+```
 
 Overwrite `src/main/kotlin/org/jevy/bookkeeper/writer/CategoryWriter.kt`:
 
@@ -563,12 +628,14 @@ package org.jevy.bookkeeper.writer
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.jevy.bookkeeper.config.AppConfig
+import org.jevy.bookkeeper.kafka.TopicNames
 import org.jevy.bookkeeper.sheets.SheetTransaction
 import org.jevy.bookkeeper.sheets.SheetsClient
 import org.jevy.bookkeeper_agent.Transaction
 
 /**
- * The Sheets writer process: [SinkWriter] over [SheetsSink] with tombstoning on.
+ * The Sheets writer process: [SinkWriter] over [SheetsSink] with tombstoning on
+ * and publish-on-done to transactions.written, which feeds the Sure writer.
  * Command name, consumer group and metric prefix are unchanged from before the
  * sink split. The internal delegates exist for CategoryWriterTest.
  */
@@ -578,7 +645,11 @@ class CategoryWriter(
     meterRegistry: MeterRegistry = SimpleMeterRegistry(),
 ) {
     private val sink = SheetsSink(config, sheetsClient)
-    private val writer = SinkWriter(config, sink, meterRegistry, tombstoneUncategorized = true)
+    private val writer = SinkWriter(
+        config, sink, meterRegistry,
+        tombstoneUncategorized = true,
+        publishOnDone = TopicNames.WRITTEN,
+    )
 
     fun run(onActivity: () -> Unit = {}, onAlive: (Boolean) -> Unit = {}) = writer.run(onActivity, onAlive)
 
@@ -599,18 +670,18 @@ Expected: PASS. `CategoryWriterTest` 12 tests, `SinkWriterTest` 6 tests. If `Cat
 - [ ] **Step 5: Run the whole suite**
 
 Run: `./gradlew test --console=plain`
-Expected: PASS, 136 tests (130 baseline plus 6).
+Expected: PASS, 139 tests (130 baseline plus 9).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/main/kotlin/org/jevy/bookkeeper/writer/
+git add src/main/kotlin/org/jevy/bookkeeper/writer/ src/main/kotlin/org/jevy/bookkeeper/kafka/TopicNames.kt
 git commit -m "Extract SheetsSink; CategoryWriter becomes SinkWriter over SheetsSink"
 ```
 
 ---
 
-### Task 3: New DLQ topic and the `CATEGORIZED` retention guard
+### Task 3: New `written` and DLQ topics, and the `CATEGORIZED` retention guard
 
 **Files:**
 - Modify: `src/main/kotlin/org/jevy/bookkeeper/kafka/TopicNames.kt`
@@ -618,7 +689,9 @@ git commit -m "Extract SheetsSink; CategoryWriter becomes SinkWriter over Sheets
 - Test: `src/test/kotlin/org/jevy/bookkeeper/kafka/TopicInitializerTest.kt`
 
 **Interfaces:**
-- Produces: `TopicNames.SURE_WRITE_FAILED = "transactions.sure-write-failed"`, `TopicInitializer.topics` visible as `internal`.
+- Produces: `TopicNames.WRITTEN = "transactions.written"`, `TopicNames.SURE_WRITE_FAILED = "transactions.sure-write-failed"`, `TopicInitializer.topics` visible as `internal`.
+
+Note: `TopicNames.WRITTEN` was already added in Task 2 so that task compiles on its own. This task adds its `TopicSpec` and the DLQ constant.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -646,6 +719,14 @@ class TopicInitializerTest {
     }
 
     @Test
+    fun `written topic is compact with retention reset, like categorized`() {
+        val s = spec(TopicNames.WRITTEN)
+        assertEquals("transactions.written", s.name)
+        assertEquals(TopicConfig.CLEANUP_POLICY_COMPACT, s.config[TopicConfig.CLEANUP_POLICY_CONFIG])
+        assertTrue(TopicConfig.RETENTION_MS_CONFIG in s.deleteConfigs)
+    }
+
+    @Test
     fun `sure-write-failed mirrors write-failed`() {
         val sure = spec(TopicNames.SURE_WRITE_FAILED)
         val sheets = spec(TopicNames.WRITE_FAILED)
@@ -664,7 +745,7 @@ Expected: compilation FAILS on `TopicNames.SURE_WRITE_FAILED` and `TopicInitiali
 
 - [ ] **Step 3: Implement**
 
-In `TopicNames.kt` add after `WRITE_FAILED`:
+In `TopicNames.kt` add after `WRITTEN` (which Task 2 added):
 
 ```kotlin
     const val SURE_WRITE_FAILED = "transactions.sure-write-failed"
@@ -687,6 +768,13 @@ and add after the `WRITE_FAILED` spec:
 
 ```kotlin
         TopicSpec(
+            // Latest category confirmed in the Sheet, per transaction. Same replay-from-zero
+            // property as CATEGORIZED: a fresh Sure consumer group backfills from it.
+            name = TopicNames.WRITTEN,
+            config = mapOf(TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
+        ),
+        TopicSpec(
             name = TopicNames.SURE_WRITE_FAILED,
             config = mapOf(
                 TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
@@ -699,13 +787,13 @@ and add after the `WRITE_FAILED` spec:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew test --tests 'org.jevy.bookkeeper.kafka.TopicInitializerTest' --console=plain`
-Expected: PASS, 2 tests.
+Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/main/kotlin/org/jevy/bookkeeper/kafka/ src/test/kotlin/org/jevy/bookkeeper/kafka/
-git commit -m "Add sure-write-failed topic and guard categorized retention"
+git commit -m "Add written and sure-write-failed topics; guard categorized retention"
 ```
 
 ---
@@ -1769,7 +1857,7 @@ git commit -m "Add TransactionMatcher rung ladder"
                  matcher: TransactionMatcher = TransactionMatcher(client, config.sureAccountMap),
                  resolver: CategoryResolver = CategoryResolver(client),
                  meterRegistry: MeterRegistry = SimpleMeterRegistry()) : CategorySink
-      // name = "sure", consumerGroup = "sure-writer", dlqTopic = TopicNames.SURE_WRITE_FAILED
+      // name = "sure", consumerGroup = "sure-writer", sourceTopic = TopicNames.WRITTEN, dlqTopic = TopicNames.SURE_WRITE_FAILED
   ```
 
 - [ ] **Step 1: Write the failing test**
@@ -1822,6 +1910,7 @@ class SureSinkTest {
         val s = sink()
         assertEquals("sure", s.name)
         assertEquals("sure-writer", s.consumerGroup)
+        assertEquals(TopicNames.WRITTEN, s.sourceTopic)
         assertEquals(TopicNames.SURE_WRITE_FAILED, s.dlqTopic)
     }
 
@@ -1960,6 +2049,8 @@ class SureSink(
 
     override val name = "sure"
     override val consumerGroup = "sure-writer"
+    /** Chained after the Sheet: only categories confirmed in the Sheet reach Sure. */
+    override val sourceTopic = TopicNames.WRITTEN
     override val dlqTopic = TopicNames.SURE_WRITE_FAILED
 
     override fun write(tx: Transaction): SinkResult {
@@ -2096,7 +2187,7 @@ Append to `DlqReplayerTest`:
 
 ```kotlin
     @Test
-    fun `sure mode republishes sure-write-failed records to categorized unchanged and tombstones the DLQ`() {
+    fun `sure mode republishes sure-write-failed records to written unchanged and tombstones the DLQ`() {
         val consumer = mockk<KafkaConsumer<String, Transaction>>(relaxed = true)
         val tombstoneProducer = mockk<KafkaProducer<String, ByteArray?>>(relaxed = true)
         val avroProducer = mockk<KafkaProducer<String, Transaction>>(relaxed = true)
@@ -2121,7 +2212,7 @@ Append to `DlqReplayerTest`:
         verify { tombstoneProducer.send(match { it.topic() == TopicNames.SURE_WRITE_FAILED && it.key() == "txn-1" && it.value() == null }) }
         val sent = slot<ProducerRecord<String, Transaction>>()
         verify { avroProducer.send(capture(sent)) }
-        assertEquals(TopicNames.CATEGORIZED, sent.captured.topic())
+        assertEquals(TopicNames.WRITTEN, sent.captured.topic())
         assertEquals("Groceries", sent.captured.value().getCategory().toString())
         assertEquals("because", sent.captured.value().getCategoryJustification().toString())
     }
@@ -2140,7 +2231,7 @@ In `DlqReplayer.kt`:
 enum class ReplayMode {
     /** categorization-failed and write-failed: clear the category, back to uncategorized, categorizer runs again. */
     RECATEGORIZE,
-    /** sure-write-failed: the category is already right, back to categorized unchanged so the sinks retry. */
+    /** sure-write-failed: the category is already in the Sheet, back to written unchanged so only the Sure sink retries. */
     SURE,
 }
 
@@ -2168,7 +2259,7 @@ Replace the body of `replayRecord` after the tombstone with:
                     .build()
                 avroProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, key, cleaned))
             }
-            ReplayMode.SURE -> avroProducer.send(ProducerRecord(TopicNames.CATEGORIZED, key, record.value()))
+            ReplayMode.SURE -> avroProducer.send(ProducerRecord(TopicNames.WRITTEN, key, record.value()))
         }
 
         logger.info("Replayed transaction {} from {} ({})", key, record.topic(), mode)
@@ -2197,7 +2288,7 @@ Expected: PASS, all existing tests plus the new one.
 
 ```bash
 git add src/main/kotlin/org/jevy/bookkeeper/replay/DlqReplayer.kt src/main/kotlin/org/jevy/bookkeeper/Main.kt src/test/kotlin/org/jevy/bookkeeper/replay/DlqReplayerTest.kt
-git commit -m "Add dlq-replay sure mode that republishes to categorized"
+git commit -m "Add dlq-replay sure mode that republishes to written"
 ```
 
 ---
@@ -2304,9 +2395,10 @@ class SureWriterIntegrationTest {
         .setTransactionId(id).setDate(date).setDescription("MERCHANT").setCategory("Groceries")
         .setAmount("-\$10.00").setAccount("Visa").build()
 
-    private fun publishCategorized(vararg txs: Transaction) {
+    /** The Sure writer consumes transactions.written, so that is where the test injects. */
+    private fun publishWritten(vararg txs: Transaction) {
         KafkaFactory.createProducer(config(sure.url("/").toString())).use { p ->
-            txs.forEach { p.send(ProducerRecord(TopicNames.CATEGORIZED, it.getTransactionId().toString(), it)).get() }
+            txs.forEach { p.send(ProducerRecord(TopicNames.WRITTEN, it.getTransactionId().toString(), it)).get() }
             p.flush()
         }
     }
@@ -2338,9 +2430,9 @@ class SureWriterIntegrationTest {
     }
 
     @Test
-    fun `a categorized event produces exactly one PATCH`() {
+    fun `an event on written produces exactly one PATCH`() {
         val id = "it-match-${UUID.randomUUID()}"
-        publishCategorized(tx(id, "3/1/2026"))
+        publishWritten(tx(id, "3/1/2026"))
         patches.clear()
         runWriter(config(sure.url("/").toString().trimEnd('/')), "it-sure-${UUID.randomUUID()}") { patches.isNotEmpty() }
         assertEquals(1, patches.count { it.requestUrl!!.encodedPath == "/api/v1/transactions/s-1" })
@@ -2350,7 +2442,7 @@ class SureWriterIntegrationTest {
     fun `a match failure produces a DLQ record and no PATCH`() {
         val id = "it-nomatch-${UUID.randomUUID()}"
         val before = dlqCount()
-        publishCategorized(tx(id, "4/1/2026"))
+        publishWritten(tx(id, "4/1/2026"))
         patches.clear()
         runWriter(config(sure.url("/").toString().trimEnd('/')), "it-sure-${UUID.randomUUID()}") { dlqCount() > before }
         assertTrue(dlqCount() > before)
@@ -2359,7 +2451,7 @@ class SureWriterIntegrationTest {
 
     @Test
     fun `dry run performs zero PATCHes`() {
-        publishCategorized(tx("it-dry-${UUID.randomUUID()}", "3/1/2026"))
+        publishWritten(tx("it-dry-${UUID.randomUUID()}", "3/1/2026"))
         patches.clear()
         runWriter(config(sure.url("/").toString().trimEnd('/'), dryRun = true), "it-sure-${UUID.randomUUID()}") { false }
         assertEquals(0, patches.size)
@@ -2368,7 +2460,7 @@ class SureWriterIntegrationTest {
     @Test
     fun `Sure unreachable exits the loop without DLQ records`() {
         val before = dlqCount()
-        publishCategorized(tx("it-down-${UUID.randomUUID()}", "3/1/2026"))
+        publishWritten(tx("it-down-${UUID.randomUUID()}", "3/1/2026"))
         val failure = runWriter(config("http://127.0.0.1:1"), "it-sure-${UUID.randomUUID()}") { false }
         assertTrue(failure is SinkUnavailableException, "expected SinkUnavailableException, got $failure")
         assertEquals(before, dlqCount())
@@ -2569,10 +2661,10 @@ Create `pipelines/sure-write-failed-view.typestream.json`:
 
 In `README.md`:
 - Change "Six services" to "Seven services".
-- In the Mermaid graph add a node `SureWriter["Sure Writer\n(Deployment)"]` inside the self-hosted subgraph, a topic node `sureFailed[transactions.sure-write-failed]` inside Redpanda, an external node `Sure[(Sure)]`, and edges `categorized -- consume --> SureWriter`, `SureWriter -- PATCH category --> Sure`, `SureWriter -- on failure --> sureFailed`.
+- In the Mermaid graph add a node `SureWriter["Sure Writer\n(Deployment)"]` inside the self-hosted subgraph, topic nodes `written[transactions.written]` and `sureFailed[transactions.sure-write-failed]` inside Redpanda, an external node `Sure[(Sure)]`, and edges `Writer -- publish on success --> written`, `written -- consume --> SureWriter`, `SureWriter -- PATCH category --> Sure`, `SureWriter -- on failure --> sureFailed`.
 - Under "Categorization Pipeline" add after the Writer paragraph:
 
-  > **Sure Writer** — Deployment (1 replica). Optional. Consumes categorized transactions on its own consumer group and mirrors each category into a self-hosted [Sure](https://github.com/we-promise/sure) instance by matching on account, date and amount. The Sheet stays the source of truth; Sure is a sink. Failures go to `transactions.sure-write-failed`; replay them with `dlq-replay sure`.
+  > **Sure Writer** — Deployment (1 replica). Optional. Consumes `transactions.written`, which the Writer publishes to after a category lands in the Sheet, and mirrors each category into a self-hosted [Sure](https://github.com/we-promise/sure) instance by matching on account, date and amount. The Sheet stays the source of truth; Sure only ever reflects what is in the Sheet. Failures go to `transactions.sure-write-failed`; replay them with `dlq-replay sure`. To backfill an existing history, reset the `category-writer` consumer group to earliest.
 
 - [ ] **Step 5: Validate the kustomization renders**
 
@@ -2590,7 +2682,7 @@ git commit -m "Add sure-writer deployment, alerts, DLQ view, and README"
 
 ## Self-review
 
-**Spec coverage.** §2 shared skeleton and sinks: Tasks 1, 2, 9. §3 config: Task 4, deployment env in Task 13. §4 retention guard: Task 3; throttle: Task 6; poll interval respected by the bounded retry in Task 6. §5 ladder, amount and account normalization: Tasks 5, 8. §6 read-before-write, PATCH without `user_modified`, category resolution hazards: Tasks 6, 7, 9. §7 failure table including mid-run `Unavailable`, new topic, `dlq-replay sure`: Tasks 1, 3, 9, 11. §8 metrics and alerts: Tasks 1, 9, 13. §10 tests: every unit item has a task; integration items are Task 12. §11 rollout is operational and lives in the spec.
+**Spec coverage.** §2 shared skeleton, sinks, chaining through `transactions.written`: Tasks 1, 2, 3, 9. §3 config: Task 4, deployment env in Task 13. §4 retention guard and `WRITTEN` topic: Task 3; backfill is an operator step (group reset) in the README, Task 13; throttle: Task 6; poll interval respected by the bounded retry in Task 6. §5 ladder, amount and account normalization: Tasks 5, 8. §6 read-before-write, PATCH without `user_modified`, category resolution hazards: Tasks 6, 7, 9. §7 failure table including mid-run `Unavailable`, new topic, `dlq-replay sure`: Tasks 1, 3, 9, 11. §8 metrics and alerts: Tasks 1, 9, 13. §10 tests: every unit item has a task; integration items are Task 12. §11 rollout is operational and lives in the spec.
 
 **Placeholder scan.** None. Every code step has full code.
 

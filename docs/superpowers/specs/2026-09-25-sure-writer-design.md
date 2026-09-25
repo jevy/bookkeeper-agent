@@ -33,11 +33,12 @@ path, so Sure tracks corrections too.
 |---|---|
 | Transaction source | **The Google Sheet, always.** Not optional. It owns transaction IDs, feeds the producer and the categorizer's `sheet_lookup` tool, and anchors the correction loop. |
 | Write targets | **Two sink modules, each optional:** `SheetsSink` and `SureSink`. Same consumer skeleton, separate processes and consumer groups. |
+| Ordering | **Chained.** Sure mirrors what actually landed in the Sheet. The Sheets sink publishes to `transactions.written` after a successful write; the Sure sink consumes that topic, not `transactions.categorized`. |
 | Sure's role | **Sink only.** Nothing reads from Sure into the pipeline. |
-| Corrections | Email-reply corrections republish through `transactions.categorized` and therefore reach both sinks. |
+| Corrections | Email-reply corrections republish through `transactions.categorized`, land in the Sheet, and then flow on to Sure. |
 | Match failure | **DLQ topic**, mirroring `transactions.write-failed`. |
 | Historical range | **No cutoff date.** Events for dates Sure does not hold will fail to match and land in the DLQ. Once that data is imported into Sure, the DLQ is replayed. |
-| Backfill | **Free**, falls out of consumer-group replay. See §4. |
+| Backfill | **Consumer-group reset** on the Sheets writer, which re-emits history onto `transactions.written`. See §4. |
 | Tenancy | Single user, configuration by environment variables. |
 
 ### Explicit non-goals
@@ -56,8 +57,8 @@ path, so Sure tracks corrections too.
 
 1. A transaction categorized by the agent appears with that category in Sure
    within one polling interval, without manual action.
-2. On first deploy, the full history of `transactions.categorized` replays
-   into Sure with no separate backfill tooling.
+2. On first deploy, the full categorized history replays into Sure with no
+   separate backfill tooling beyond a consumer-group reset.
 3. A categorization that cannot be matched to a Sure transaction is visible in
    a DLQ topic and in metrics, never silently dropped.
 4. A subsequent bank sync in Sure does not overwrite a category the agent
@@ -72,26 +73,43 @@ path, so Sure tracks corrections too.
 ## 2. Architecture
 
 ```
-                        transactions.categorized
-                        (compact, keyed by transaction_id)
-                                   │
-                    ┌──────────────┴──────────────┐
-                    │                             │
-            group: category-writer        group: sure-writer   ← NEW
-                    │                             │
-               SinkWriter                    SinkWriter
-              (shared loop)                 (shared loop)
-                    │                             │
-               SheetsSink                     SureSink
-                    │                             │
-             Google Sheets                   Sure REST API
-             (source of truth)               PATCH /api/v1/transactions/:id
-                    │                             │
-   on success: tombstone →               on unmatched / 4xx ↓
-   transactions.uncategorized            transactions.sure-write-failed
-   on failure: DLQ →                     on 5xx / timeout: exit loop,
-   transactions.write-failed             liveness restarts pod
+            transactions.categorized
+            (compact, keyed by transaction_id)
+                       │
+               group: category-writer
+                       │
+                  SinkWriter (shared loop)
+                       │
+                  SheetsSink
+                       │
+                Google Sheets (source of truth)
+                       │
+     ┌─────────────────┼──────────────────────┐
+     │                 │                      │
+  Written or        Rejected               Rejected
+  already there        │                      │
+     │            tombstone →            DLQ →
+     │            transactions.          transactions.
+     │            uncategorized          write-failed
+     ▼
+transactions.written                       ← NEW, compact
+(landed in the Sheet)
+     │
+group: sure-writer                         ← NEW
+     │
+SinkWriter (shared loop)
+     │
+  SureSink
+     │
+Sure REST API  PATCH /api/v1/transactions/:id
+     │
+  on unmatched / 4xx → transactions.sure-write-failed
+  on 5xx / timeout   → exit loop, liveness restarts pod
 ```
+
+The Sure writer never sees a categorization that did not land in the Sheet.
+If the Sheet write is rejected, Sure is untouched. There is no window where
+Sure is ahead of the Sheet.
 
 ### The shared skeleton
 
@@ -103,39 +121,53 @@ health callbacks, tangled with Sheets logic. Extract that loop into
 interface CategorySink {
     val name: String                       // "writer" | "sure"; metric prefix
     val consumerGroup: String              // "category-writer" | "sure-writer"
+    val sourceTopic: String                // CATEGORIZED for Sheets, WRITTEN for Sure
     val dlqTopic: String
     fun write(tx: Transaction): SinkResult
 }
 
 sealed interface SinkResult {
     object Written : SinkResult
-    data class Skipped(val reason: String) : SinkResult
+    /** landed = true means the target already holds this category (the write is effectively done). */
+    data class Skipped(val reason: String, val landed: Boolean = false) : SinkResult
     data class Rejected(val reason: String, val cause: Throwable? = null) : SinkResult  // → DLQ, continue
     data class Unavailable(val cause: Throwable) : SinkResult                            // → exit loop, no commit
 }
 ```
 
-`SinkWriter` per record:
+`SinkWriter(config, sink, meterRegistry, tombstoneUncategorized = false,
+publishOnDone: String? = null)` per record:
 
 | Result | Action |
 |---|---|
-| `Written` | increment `written`, tombstone if enabled, commit |
-| `Skipped` | increment `skipped{reason}`, commit |
+| `Written` | increment `written`, tombstone if enabled, publish to `publishOnDone` if set, commit |
+| `Skipped(landed = true)` | increment `skipped{reason}`, publish to `publishOnDone` if set, commit |
+| `Skipped(landed = false)` | increment `skipped{reason}`, commit |
 | `Rejected` | send to `sink.dlqTopic`, tombstone if enabled, increment `errors`, commit |
 | `Unavailable` | do **not** commit, `onAlive(false)`, rethrow. Pod restarts and resumes from the last committed offset. |
 
-Tombstoning `transactions.uncategorized` is a Sheets-only concern, enabled
-by a constructor flag on `SinkWriter`. Today `CategoryWriter` tombstones on
-failure as well as success (the transaction is done from the pipeline's point
-of view once it is in the DLQ), so the flag applies to both `Written` and
-`Rejected`. The Sure sink never writes to `transactions.uncategorized`.
+The Sheets writer runs with `tombstoneUncategorized = true` and
+`publishOnDone = transactions.written`. The Sure writer runs with neither.
+Publishing on `Skipped(landed = true)` is what makes a Sheets consumer-group
+reset re-emit the whole history for Sure (§4) without rewriting the Sheet.
+
+Tombstoning `transactions.uncategorized` is a Sheets-only concern. Today
+`CategoryWriter` tombstones on failure as well as success (the transaction is
+done from the pipeline's point of view once it is in the DLQ), so the flag
+applies to both `Written` and `Rejected`. The Sure sink never writes to
+`transactions.uncategorized`.
 
 **Why still two processes and two consumer groups:** the sinks must fail
 independently. A Sure outage must not stall Sheet writes, must not produce
 spurious `transactions.write-failed` records, and must not block tombstones.
-Separate groups also give the Sure path its own offsets, which is what makes
-replay-as-backfill work (§4). "Module" means a code unit, not one loop writing
-to both targets.
+"Module" means a code unit, not one loop writing to both targets.
+
+### New topic
+
+`transactions.written`: `cleanup.policy=compact`, keyed by `transaction_id`,
+`retention.ms` in `deleteConfigs` so the compacted history is kept
+indefinitely. It holds the latest category that is confirmed to be in the
+Sheet, one record per transaction.
 
 **Why not a sink connector:** the matching logic in §5 is application logic
 with a fallback ladder, not a field mapping.
@@ -187,23 +219,38 @@ deploying or not deploying the `writer` process, which is already the case.
 
 ## 4. Backfill via replay
 
-`transactions.categorized` is `cleanup.policy=compact`, so the log holds the
-latest categorization for every transaction the agent has ever categorized.
+`transactions.written` starts empty on first deploy. The backfill is a
+consumer-group reset on the **Sheets** writer:
 
-A new consumer group with `auto.offset.reset=earliest` (already the
-`KafkaFactory` default) reads that entire history on first start. **This is
-the backfill.** No separate job.
+```
+kafka-consumer-groups --bootstrap-server ... --group category-writer \
+  --topic transactions.categorized --reset-offsets --to-earliest --execute
+```
+
+(Scale the `writer` Deployment to zero first; the reset is refused while the
+group has members. Scale it back up afterwards.)
+
+`transactions.categorized` is `cleanup.policy=compact`, so it holds the latest
+categorization for every transaction the agent has ever categorized. The
+Sheets writer re-walks it, finds each row already carries the category,
+returns `Skipped("already_categorized", landed = true)`, and the loop
+publishes the record to `transactions.written`. No Sheet cell is rewritten.
+The Sure writer, on a fresh group with `auto.offset.reset=earliest` (the
+`KafkaFactory` default), then consumes the whole of `transactions.written`.
 
 Consequences:
 
-1. **Burst.** Throttled by `SURE_MAX_API_CALLS_PER_SEC`. At the default 5/s
-   and roughly two calls per record, a thousand events replay in about seven
-   minutes.
-2. **Coverage.** Replay only covers transactions that passed through the
+1. **Sheets cost.** Each replayed record is one full-sheet read plus one cell
+   read, the same as normal processing. A thousand events is roughly ten
+   minutes against the Sheets API read quota.
+2. **Sure burst.** Throttled by `SURE_MAX_API_CALLS_PER_SEC`. At the default
+   5/s and roughly two calls per record, a thousand events replay in about
+   seven minutes.
+3. **Coverage.** Replay only covers transactions that passed through the
    Sheet. Events for dates Sure does not hold cannot match and will DLQ.
    After that data is imported into Sure, `dlq-replay sure` (§7) pushes them
    through.
-3. **Poll settings.** `KafkaFactory.createConsumer` sets
+4. **Poll settings.** `KafkaFactory.createConsumer` sets
    `max.poll.records=1` and `max.poll.interval.ms=360000`. Bounded retries in
    `SureClient` must complete well inside six minutes per record.
 
@@ -211,10 +258,11 @@ Consequences:
 
 `TopicInitializer` sets `deleteConfigs = listOf(RETENTION_MS_CONFIG)` on every
 compacted topic except `CATEGORIZED`, which is left with the broker default
-`retention.ms`. Compact-only topics ignore `retention.ms` today, but the whole
-backfill property rests on that. **Add `deleteConfigs =
+`retention.ms`. Compact-only topics ignore `retention.ms` today, but the
+Sheets-side replay rests on that. **Add `deleteConfigs =
 listOf(TopicConfig.RETENTION_MS_CONFIG)` to the `CATEGORIZED` TopicSpec** with a
-comment that replay-from-zero is load-bearing.
+comment that replay-from-zero is load-bearing, and give `WRITTEN` the same
+treatment from the start.
 
 ---
 
@@ -353,12 +401,12 @@ already known and correct, and re-categorizing costs LLM calls. Add a mode:
 
 ```
 bookkeeper-agent dlq-replay            # existing: categorization-failed + write-failed → uncategorized
-bookkeeper-agent dlq-replay sure       # new: sure-write-failed → categorized, unchanged
+bookkeeper-agent dlq-replay sure       # new: sure-write-failed → written, unchanged
 ```
 
 The Sure mode tombstones the DLQ entry and republishes the record **as-is** to
-`transactions.categorized`. Both sinks see it again. The Sheets sink skips
-(category already matches, one Sheets read), the Sure sink retries the match.
+`transactions.written`. The category is already in the Sheet, so the Sheets
+writer is not involved; only the Sure sink retries the match.
 
 **No tombstones.** The Sure sink never writes to `transactions.uncategorized`.
 
@@ -420,7 +468,8 @@ the broker-gated integration style from `3db4d2b`.
 - `SinkWriter` with a fake sink: each `SinkResult` variant produces exactly the
   action in the §2 table; `Unavailable` leaves the offset uncommitted and calls
   `onAlive(false)`; tombstoning fires for `Written` and `Rejected` only when
-  enabled.
+  enabled; `publishOnDone` fires for `Written` and `Skipped(landed = true)`
+  only, and only when set; the loop subscribes to `sink.sourceTopic`.
 - `TransactionMatcher`: one test per rung; ambiguity yields no match; the
   ±3-day window includes boundaries; unmapped account, bad amount and bad
   date reject before any API call.
@@ -435,7 +484,7 @@ the broker-gated integration style from `3db4d2b`.
   PATCHes.
 
 **Integration (broker-gated, stubbed Sure)**
-- A categorized event produces exactly one PATCH.
+- An event on `transactions.written` produces exactly one PATCH.
 - Match failure produces one DLQ record and no PATCH.
 - Sure unreachable: loop exits, no offset commit, no DLQ records.
 - `SURE_DRY_RUN=true` performs zero writes.
@@ -451,16 +500,19 @@ distribution and would-be reject reasons.
 1. **Refactor only.** Extract `SinkWriter` and `SheetsSink`. Ship. Confirm
    `bookkeeper.writer.*` metrics and behaviour are unchanged.
 2. Do the operator prerequisites in §9.
-3. Run `init` to add the `sure-write-failed` topic and the `CATEGORIZED`
-   guard.
-4. Deploy `sure-writer` with `SURE_ENABLED=true`, `SURE_DRY_RUN=true`. Inspect
+3. Run `init` to add the `written` and `sure-write-failed` topics and the
+   `CATEGORIZED` guard.
+4. Backfill `transactions.written`: scale `writer` to zero, reset the
+   `category-writer` group to earliest (§4), scale it back up, wait for lag
+   to reach zero.
+5. Deploy `sure-writer` with `SURE_ENABLED=true`, `SURE_DRY_RUN=true`. Inspect
    rung distribution and reject reasons across the full replay.
-5. Fix the account map until rung 2 dominates.
-6. Set `SURE_DRY_RUN=false`. Reset the `sure-writer` consumer group to
-   earliest to re-replay.
-7. Confirm Sure's uncategorized count drops and Sheets writer metrics are
+6. Fix the account map until rung 2 dominates.
+7. Set `SURE_DRY_RUN=false`. Reset the `sure-writer` consumer group to
+   earliest on `transactions.written` to re-replay.
+8. Confirm Sure's uncategorized count drops and Sheets writer metrics are
    unchanged throughout.
-8. If Sure was missing date ranges and they are later imported:
+9. If Sure was missing date ranges and they are later imported:
    `dlq-replay sure`.
 
 Rollback is `SURE_ENABLED=false`, or scaling `sure-writer` to zero. Nothing in
