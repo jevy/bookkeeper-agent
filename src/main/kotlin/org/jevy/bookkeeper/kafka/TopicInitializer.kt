@@ -25,7 +25,7 @@ private const val DEFAULT_PARTITIONS = 3
 
 object TopicInitializer {
 
-    private val topics = listOf(
+    internal val topics = listOf(
         TopicSpec(
             name = TopicNames.UNCATEGORIZED,
             config = mapOf(
@@ -35,8 +35,12 @@ object TopicInitializer {
             deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
         ),
         TopicSpec(
+            // Replay-from-zero is load bearing: resetting the Sheets writer group on this topic
+            // is how transactions.written is backfilled. Keep retention.ms at the broker default so
+            // the compact-only policy is the only thing governing what is kept.
             name = TopicNames.CATEGORIZED,
             config = mapOf(TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
         ),
         TopicSpec(
             // Digest outbox: categorizer writes "needs digesting", digest writes a tombstone
@@ -59,6 +63,21 @@ object TopicInitializer {
         ),
         TopicSpec(
             name = TopicNames.WRITE_FAILED,
+            config = mapOf(
+                TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.DELETE_RETENTION_MS_CONFIG to "86400000", // tombstones retained 24h
+            ),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
+        ),
+        TopicSpec(
+            // Latest category confirmed in the Sheet, per transaction. Same replay-from-zero
+            // property as CATEGORIZED: a fresh Sure consumer group backfills from it.
+            name = TopicNames.WRITTEN,
+            config = mapOf(TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT),
+            deleteConfigs = listOf(TopicConfig.RETENTION_MS_CONFIG),
+        ),
+        TopicSpec(
+            name = TopicNames.SURE_WRITE_FAILED,
             config = mapOf(
                 TopicConfig.CLEANUP_POLICY_CONFIG to TopicConfig.CLEANUP_POLICY_COMPACT,
                 TopicConfig.DELETE_RETENTION_MS_CONFIG to "86400000", // tombstones retained 24h
