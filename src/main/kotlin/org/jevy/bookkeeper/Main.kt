@@ -10,6 +10,7 @@ import org.jevy.bookkeeper.metrics.Metrics
 import org.jevy.bookkeeper.producer.TransactionProducer
 import org.jevy.bookkeeper.report.SpendingReport
 import org.jevy.bookkeeper.replay.DlqReplayer
+import org.jevy.bookkeeper.replay.ReplayMode
 import org.jevy.bookkeeper.sure.SureSink
 import org.jevy.bookkeeper.writer.CategoryWriter
 import org.jevy.bookkeeper.writer.SinkWriter
@@ -83,8 +84,13 @@ fun main(args: Array<String>) {
                 additionalContextPrompt = null,
                 model = "",
             )
-            logger.info("Starting DLQ Replayer")
-            DlqReplayer(config).run()
+            val mode = when (args.getOrNull(1)) {
+                null -> ReplayMode.RECATEGORIZE
+                "sure" -> ReplayMode.SURE
+                else -> throw IllegalArgumentException("Unknown dlq-replay mode '${args[1]}'. Use no argument or 'sure'.")
+            }
+            logger.info("Starting DLQ Replayer ({})", mode)
+            DlqReplayer(config, mode).run()
         }
         "digest-sender" -> {
             val config = AppConfig.fromEnv()
