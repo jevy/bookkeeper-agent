@@ -31,7 +31,7 @@
 Inputs the spec implies but that are easy to get wrong. Each has a pinning test in the task named.
 
 1. **Sheet amount `"$0.00"` or an amount with no `$`** (Task 5): parsing must return zero and plain decimals rather than throwing, and a malformed string like `"abc"` must throw, never silently match nothing.
-2. **A Sure transaction already carrying the same category** (Task 9): must be `Skipped("already_categorized")` with zero PATCH calls, or every replay rewrites 925 rows.
+2. **A Sure transaction already carrying the same category** (Task 9): must be `Skipped("already_categorized")` with zero PATCH calls, or every replay rewrites every row Sure already has right.
 3. **Sure returning more than 100 matches for one query** (Task 6): the client must follow `pagination.total_pages`, or rung 2 could miss the true match and fall through to a wrong rung-3 candidate.
 4. **A transaction whose account name is not in `SURE_ACCOUNT_MAP`** (Task 8): must be `Rejected("account_unmapped")`, not an exception that the loop treats as fatal.
 5. **Connection refused on the very first Sure call after startup** (Task 9): must surface as `Unavailable`, and `SinkWriter` must then exit without committing (Task 1 pins the loop side).
@@ -756,9 +756,9 @@ Append to `AppConfigTest`:
 
     @Test
     fun `parseAccountMap splits name=id pairs on semicolons and trims`() {
-        val map = AppConfig.parseAccountMap(" TD ALL-INCLUSIVE BANKING PLAN (6404) = 11111111-aaaa ; Visa=22222222-bbbb;")
+        val map = AppConfig.parseAccountMap(" Chequing (1234) = 11111111-aaaa ; Visa=22222222-bbbb;")
         assertEquals(
-            mapOf("TD ALL-INCLUSIVE BANKING PLAN (6404)" to "11111111-aaaa", "Visa" to "22222222-bbbb"),
+            mapOf("Chequing (1234)" to "11111111-aaaa", "Visa" to "22222222-bbbb"),
             map,
         )
     }
@@ -2519,7 +2519,7 @@ In `k8s/app/prometheusrule.yaml` append under `rules:`:
             severity: warning
           annotations:
             summary: "Sure writer rejecting more than 20% of transactions"
-            description: "Expected during the initial replay while the 2025 to 2026-04 gap is missing from Sure. Silence during replay; investigate afterwards."
+            description: "Expected during an initial replay if Sure is missing date ranges the Sheet has. Silence during replay; investigate afterwards."
         - alert: SureWriterStalled
           expr: |
             sum(increase(bookkeeper_sure_transactions_written_total[24h])) == 0

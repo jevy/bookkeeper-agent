@@ -1,9 +1,9 @@
 # Sure Writer — Design Spec
 
-**Date:** 2026-09-25 (revised after review, same day)
+**Date:** 2026-09-25
 **Status:** Draft, awaiting review
 **Scope:** Restructure the writer as two independent sink modules, Sheets and
-Sure, each optional, and add the Sure sink so categorizations mirror into the
+Sure, each optional, and add the Sure sink so categorizations mirror into a
 self-hosted [Sure](https://github.com/we-promise/sure) instance.
 
 ---
@@ -12,18 +12,13 @@ self-hosted [Sure](https://github.com/we-promise/sure) instance.
 
 ### The problem
 
-Sure (`sure.jevy.org`) holds 8,576 transactions. 7,475 are categorized, all of
-them inherited from a one-off Tiller CSV import on 2026-09-10. Of the 911
-transactions that arrived via Sure's own SimpleFIN connection, **zero are
-categorized**, and nothing in Sure will ever categorize them well:
+Sure is a good personal-finance UI, but its built-in categorization is a
+single zero-shot LLM call over `{amount, description, merchant}` against a
+flat list of category names. No history, no tools, no retrieval. Transactions
+that arrive through Sure's own bank-sync connections (SimpleFIN, Plaid, and
+so on) stay uncategorized, or get categorized badly.
 
-- `Family#data_enrichment_enabled = false` (auto-categorization is off)
-- `Rule.count = 0` (no rules exist)
-- Sure's `Family::AutoCategorizer` is a single zero-shot LLM call over
-  `{id, amount, classification, description, merchant}` against a flat list of
-  category names. No history, no tools, no retrieval.
-
-The bookkeeper agent already solves this problem well.
+The bookkeeper agent already categorizes well, against a Google Sheet.
 
 ### The outcome
 
@@ -32,18 +27,18 @@ becomes a useful UI over a correctly-categorized ledger without owning any
 categorization logic. Corrections made by email reply flow through the same
 path, so Sure tracks corrections too.
 
-### Decisions taken (confirmed with Jevin, 2026-09-25)
+### Decisions
 
 | Decision | Choice |
 |---|---|
 | Transaction source | **The Google Sheet, always.** Not optional. It owns transaction IDs, feeds the producer and the categorizer's `sheet_lookup` tool, and anchors the correction loop. |
 | Write targets | **Two sink modules, each optional:** `SheetsSink` and `SureSink`. Same consumer skeleton, separate processes and consumer groups. |
 | Sure's role | **Sink only.** Nothing reads from Sure into the pipeline. |
-| Corrections | Email-reply corrections republish through `transactions.categorized` and therefore reach both sinks. Desired. |
+| Corrections | Email-reply corrections republish through `transactions.categorized` and therefore reach both sinks. |
 | Match failure | **DLQ topic**, mirroring `transactions.write-failed`. |
-| Sure data gap | Sure has no data for 2025-01 through 2026-04. Events in that range will DLQ. Jevin will import the gap into Sure later; the DLQ is then replayed. **No cutoff date in the writer.** |
+| Historical range | **No cutoff date.** Events for dates Sure does not hold will fail to match and land in the DLQ. Once that data is imported into Sure, the DLQ is replayed. |
 | Backfill | **Free**, falls out of consumer-group replay. See §4. |
-| Multi-tenant | Not a driver. Homelab, single user. Config is environment variables. |
+| Tenancy | Single user, configuration by environment variables. |
 
 ### Explicit non-goals
 
@@ -54,20 +49,23 @@ path, so Sure tracks corrections too.
 - The digest and email-reply loop stays pointed at the Sheet.
 - No changes to the categorizer, its prompt, or its tools.
 - Transactions present in Sure but absent from the Sheet stay uncategorized.
+- Categories edited by hand directly in the Sheet do not flow to Sure. Only
+  agent categorizations and email corrections pass through Kafka.
 
 ### Success criteria
 
 1. A transaction categorized by the agent appears with that category in Sure
    within one polling interval, without manual action.
-2. On first deploy, the existing ~925 categorized events replay into Sure and
-   the uncategorized count drops materially from 911.
+2. On first deploy, the full history of `transactions.categorized` replays
+   into Sure with no separate backfill tooling.
 3. A categorization that cannot be matched to a Sure transaction is visible in
-   a DLQ topic and in Grafana, never silently dropped.
-4. A subsequent SimpleFIN sync does not overwrite a category the agent wrote.
+   a DLQ topic and in metrics, never silently dropped.
+4. A subsequent bank sync in Sure does not overwrite a category the agent
+   wrote.
 5. A Sure outage at any point, startup or mid-replay, never drains the topic
    into the DLQ. The pod restarts and resumes where it left off.
 6. `CategoryWriterTest` passes unchanged against the Sheets sink, and Sheets
-   writer metrics are unchanged in Grafana throughout the rollout.
+   writer metrics are unchanged throughout the rollout.
 
 ---
 
@@ -103,7 +101,7 @@ health callbacks, tangled with Sheets logic. Extract that loop into
 
 ```kotlin
 interface CategorySink {
-    val name: String                       // "sheets" | "sure"; metric prefix
+    val name: String                       // "writer" | "sure"; metric prefix
     val consumerGroup: String              // "category-writer" | "sure-writer"
     val dlqTopic: String
     fun write(tx: Transaction): SinkResult
@@ -121,18 +119,16 @@ sealed interface SinkResult {
 
 | Result | Action |
 |---|---|
-| `Written` | `onSuccess(tx)` hook, increment `written`, commit |
+| `Written` | increment `written`, tombstone if enabled, commit |
 | `Skipped` | increment `skipped{reason}`, commit |
-| `Rejected` | send to `sink.dlqTopic`, `onSuccess(tx)` hook **only for Sheets** (see below), increment `errors`, commit |
+| `Rejected` | send to `sink.dlqTopic`, tombstone if enabled, increment `errors`, commit |
 | `Unavailable` | do **not** commit, `onAlive(false)`, rethrow. Pod restarts and resumes from the last committed offset. |
 
-The `onSuccess` hook is how tombstoning stays a Sheets-only concern.
-`SheetsSink` is constructed with a hook that tombstones
-`transactions.uncategorized`; `SureSink` gets a no-op. Today `CategoryWriter`
-tombstones on failure as well as success (the transaction is done from the
-pipeline's point of view once it is in the DLQ), so the Sheets hook is invoked
-for both `Written` and `Rejected`. The Sure sink never writes to
-`transactions.uncategorized`.
+Tombstoning `transactions.uncategorized` is a Sheets-only concern, enabled
+by a constructor flag on `SinkWriter`. Today `CategoryWriter` tombstones on
+failure as well as success (the transaction is done from the pipeline's point
+of view once it is in the DLQ), so the flag applies to both `Written` and
+`Rejected`. The Sure sink never writes to `transactions.uncategorized`.
 
 **Why still two processes and two consumer groups:** the sinks must fail
 independently. A Sure outage must not stall Sheet writes, must not produce
@@ -175,14 +171,14 @@ All read through `AppConfig`. `AppConfig.fromEnv()` currently requires
 does not need them but gets them anyway from the shared secret. Do not loosen
 `requireEnv`; the Sheet is mandatory by decision.
 
-| Variable | Source | Required | Notes |
-|---|---|---|---|
-| `SURE_API_URL` | plain value | for `sure-writer` | `http://sure-web.apps.svc.cluster.local:3000`. In-cluster service, bypasses Authentik forward-auth. |
-| `SURE_API_KEY` | `secretKeyRef: sure-writer` | for `sure-writer` | Sure `ApiKey`, read+write. |
-| `SURE_ENABLED` | plain value | no, default `true` | Kill switch. When false the process consumes and commits without matching or writing. Nothing is lost: compaction keeps the latest event per key, and a consumer group reset replays it. |
-| `SURE_MAX_API_CALLS_PER_SEC` | plain value | no, default `5` | Throttles **all** Sure API calls, GET and PATCH. Matching costs one to three GETs per record, so throttling only writes would not protect Sure during replay. |
-| `SURE_DRY_RUN` | plain value | no, default `false` | Match and resolve, log the intended PATCH, perform none. Commits offsets. |
-| `SURE_ACCOUNT_MAP` | plain value | for `sure-writer` | `"Sheet account name=sure-account-uuid;..."`. Sure account **IDs**, not names, written after the duplicate-account merge (§5). |
+| Variable | Required | Notes |
+|---|---|---|
+| `SURE_API_URL` | for `sure-writer` | Base URL of the Sure instance. If Sure sits behind an auth proxy, point this at the internal service, not the public ingress. |
+| `SURE_API_KEY` | for `sure-writer` | A Sure API key with read and write access to transactions. |
+| `SURE_ENABLED` | no, default `true` | Kill switch. When false the process consumes and commits without matching or writing. Nothing is lost: compaction keeps the latest event per key, and a consumer group reset replays it. |
+| `SURE_MAX_API_CALLS_PER_SEC` | no, default `5` | Throttles **all** Sure API calls, GET and PATCH. Matching costs one to three GETs per record, so throttling only writes would not protect Sure during replay. |
+| `SURE_DRY_RUN` | no, default `false` | Match and resolve, log the intended PATCH, perform none. Commits offsets. |
+| `SURE_ACCOUNT_MAP` | for `sure-writer` | `"Sheet account name=sure-account-uuid;..."`. Sure account **IDs**, not names. |
 
 `SHEETS_ENABLED` is deliberately absent. The Sheets sink is toggled by
 deploying or not deploying the `writer` process, which is already the case.
@@ -191,9 +187,8 @@ deploying or not deploying the `writer` process, which is already the case.
 
 ## 4. Backfill via replay
 
-`transactions.categorized` is `cleanup.policy=compact` and all three partitions
-report `LOG-START-OFFSET=0`. The log holds the latest categorization for every
-transaction the agent has ever categorized, about 925 as of 2026-09-25.
+`transactions.categorized` is `cleanup.policy=compact`, so the log holds the
+latest categorization for every transaction the agent has ever categorized.
 
 A new consumer group with `auto.offset.reset=earliest` (already the
 `KafkaFactory` default) reads that entire history on first start. **This is
@@ -201,13 +196,13 @@ the backfill.** No separate job.
 
 Consequences:
 
-1. **Burst.** Throttled by `SURE_MAX_API_CALLS_PER_SEC`. At 5/s and roughly
-   two calls per record, the replay takes about six minutes. Sure runs on
-   `optiplex-tower`, the node with the least headroom.
+1. **Burst.** Throttled by `SURE_MAX_API_CALLS_PER_SEC`. At the default 5/s
+   and roughly two calls per record, a thousand events replay in about seven
+   minutes.
 2. **Coverage.** Replay only covers transactions that passed through the
-   Sheet. Events dated in Sure's data gap (2025-01 through 2026-04) will not
-   match and will DLQ. That is expected. After Jevin imports the gap into Sure,
-   the DLQ is replayed (§7) and they match.
+   Sheet. Events for dates Sure does not hold cannot match and will DLQ.
+   After that data is imported into Sure, `dlq-replay sure` (§7) pushes them
+   through.
 3. **Poll settings.** `KafkaFactory.createConsumer` sets
    `max.poll.records=1` and `max.poll.interval.ms=360000`. Bounded retries in
    `SureClient` must complete well inside six minutes per record.
@@ -225,22 +220,22 @@ comment that replay-from-zero is load-bearing.
 
 ## 5. Matching
 
-`Transaction.transaction_id` is a Yodlee/Tiller identifier from the Sheet.
-Sure's transactions carry SimpleFIN ids (`TRN-...`, exposed as `external_id`)
-or import-assigned ids. They share no key.
+`Transaction.transaction_id` is the Sheet's identifier (Yodlee via Tiller).
+Sure's transactions carry provider ids (exposed as `external_id`) or
+import-assigned ids. They share no key.
 
 `TransactionMatcher` is an explicit ladder, stopping at the first unambiguous
 hit. Each rung is recorded as a metric tag.
 
 | Rung | Strategy | Notes |
 |---|---|---|
-| 1 | **In-memory cache** | `transaction_id → sure_transaction_id`, process lifetime only. Saves API calls on redelivery. **Not persisted.** Sure cannot hold it (`external_id` is create-only and SimpleFIN rows own theirs), the PATCH is idempotent, and rung 2 is a single GET, so durability buys nothing. |
+| 1 | **In-memory cache** | `transaction_id → sure_transaction_id`, process lifetime only. Saves API calls on redelivery. **Not persisted.** Sure cannot hold it (`external_id` is create-only and synced rows own theirs), the PATCH is idempotent, and rung 2 is a single GET, so durability buys nothing. |
 | 2 | **Exact triple** | `GET /api/v1/transactions?account_id=&start_date=&end_date=&min_amount=&max_amount=&per_page=100` with date and amount both pinned. One result → match. |
-| 3 | **Triple with date window** | Same, ±3 days, for posting-date drift between Tiller and SimpleFIN. One result → match. |
+| 3 | **Triple with date window** | Same, ±3 days, for posting-date drift between the Sheet's provider and Sure's. One result → match. |
 | 4 | **Triple + description similarity** | If rungs 2–3 return several candidates, disambiguate on normalized description. Require a clear winner. |
 | — | **No match, or still ambiguous** | `Rejected` → DLQ. Never guess. |
 
-Verified against the running `sure-web` pod: the index supports `account_id`,
+Verified against Sure's source: the index supports `account_id`,
 `start_date`, `end_date`, `min_amount`, `max_amount`, `search`, and `per_page`
 up to 100. The response includes each transaction's current `category` and
 `external_id`, so the rung 2 query also serves the read-before-write check in
@@ -249,25 +244,24 @@ up to 100. The response includes each transaction's current `category` and
 ### Amount and account normalization
 
 - **Amount** arrives as a display string (`"-$384.91"`). Parse to a signed
-  decimal. **Sure's sign is inverted relative to the Sheet's**, verified on
-  live data:
+  decimal. **Sure's database sign is inverted relative to the Sheet's:**
 
   | | Expense | Income |
   |---|---|---|
-  | Sheet / Avro `amount` | `-$384.91` | `$1,371.24` |
-  | Sure `entry.amount` | `140.82` | `-1371.24` |
+  | Sheet / Avro `amount` | negative | positive |
+  | Sure `entries.amount` (DB, what `min_amount`/`max_amount` filter on) | positive | negative |
+  | Sure API `signed_amount_cents` (response) | negative | positive |
 
-  `sure_amount = -sheet_amount`. One function in `AmountConvention.kt`, a
-  test per direction. An inverted comparison fails silently by matching
-  nothing, so this must not be scattered.
-- **Account.** Sure holds four duplicate account pairs (Tiller import and
-  SimpleFIN each created e.g. `TD ALL-INCLUSIVE BANKING PLAN (6404)`). Tiller-era
-  transactions live in one half, SimpleFIN-era in the other, so a name-based
-  map that prefers one half is wrong for the other era. Therefore:
-
-  > **Prerequisite:** merge the four pairs in Sure first. Then write
-  > `SURE_ACCOUNT_MAP` against the surviving account **IDs**. Not part of this
-  > spec's code, but the rollout (§11) blocks on it.
+  `sure_entry_amount = -sheet_amount`, used **only** for the query
+  parameters. Responses are compared on `signed_amount_cents`, which already
+  matches the Sheet's sign. One function in `AmountConvention.kt`, a test per
+  direction. An inverted comparison fails silently by matching nothing, so
+  this must not be scattered.
+- **Account.** Sheet account names and Sure account names differ, and a Sure
+  instance that has both a CSV import and a bank-sync connection may hold
+  duplicate accounts. Do not infer. `SURE_ACCOUNT_MAP` maps each Sheet
+  account name to one Sure account **ID**. Merge duplicate accounts in Sure
+  before writing the map; that is an operator prerequisite, not code.
 
 ---
 
@@ -279,8 +273,7 @@ up to 100. The response includes each transaction's current `category` and
 2. Resolve category name → id. Unresolved → `Rejected("category_unresolved")`.
 3. **Read-before-write.** If the matched Sure transaction's `category.id`
    already equals the resolved id → `Skipped("already_categorized")`. The Sheets
-   sink has the same check. Without it a replay re-PATCHes every row and
-   re-stamps `user_modified` for nothing.
+   sink has the same check. Without it a replay re-PATCHes every row.
 4. PATCH:
 
 ```http
@@ -291,12 +284,12 @@ X-Api-Key: <key>
 
 **Do not send `user_modified`.** It is permitted by `transaction_params` but
 only `create` acts on it (`mark_user_modified!`); `update` ignores it.
-Criterion 4 holds by a different mechanism, verified in the running pod:
+Criterion 4 holds by a different mechanism, verified in Sure's source:
 `update` calls `@entry.lock_saved_attributes!`, which locks `category_id` on
 the transaction, and the provider import path writes categories through
 `enrich_attribute(:category_id, ...)`, which skips locked attributes. Sure's
 own auto-categorizer additionally only fills a blank category. So a category
-written by PATCH survives both SimpleFIN sync and Sure enrichment.
+written by PATCH survives both bank sync and Sure enrichment.
 
 The `X-Api-Key` header is how `Api::V1::BaseController` authenticates API
 keys.
@@ -306,28 +299,24 @@ keys.
 `GET /api/v1/transactions` returns `{ "transactions": [...], "pagination":
 { "page", "per_page", "total_count", "total_pages" } }`. Each transaction has
 `id`, `date` (ISO), `name`, `external_id`, `signed_amount_cents` (integer,
-**income positive, expense negative**, same convention as the Sheet),
-`account { id, name }`, and `category { id, name } | null`.
-
-Compare on `signed_amount_cents`, never on the localized `amount` string. The
-sign flip in §5 applies **only** to the `min_amount`/`max_amount` query
-parameters, which filter on the raw `entries.amount` column where expenses
-are positive.
+income positive, expense negative), `account { id, name }`, and
+`category { id, name } | null`.
 
 ### Category resolution
 
 `CategoryResolver` fetches `GET /api/v1/categories` once, caches by
 case-folded name, and refreshes on a miss.
 
-Sure's taxonomy already matches the Sheet's 40 Tiller categories. No mapping
-table.
+The assumption is that Sure's categories were created with the same names
+the Sheet uses (for example by importing the Sheet's history into Sure). No
+mapping table.
 
 Hazards:
 
-- **Case-duplicate rows:** `groceries` and `Groceries`, `restaurants` and
-  `Restaurants` are separate records. When a folded name resolves to more than
-  one id → `Rejected("category_ambiguous")`. Silently splitting a category
-  across two ids corrupts reporting.
+- **Case-duplicate rows:** if Sure holds both `groceries` and `Groceries` as
+  separate records, a folded name resolves to more than one id →
+  `Rejected("category_ambiguous")`. Silently splitting a category across two
+  ids corrupts reporting. Merge them in Sure.
 - **Unknown name** → `Rejected("category_unresolved")`. Do not auto-create
   categories. Silent taxonomy drift is worse than a visible failure.
 
@@ -340,15 +329,14 @@ Hazards:
 | No match / ambiguous | `Rejected` | DLQ, continue, commit |
 | Unresolvable or ambiguous category | `Rejected` | DLQ, continue, commit |
 | Sure 4xx | `Rejected` | DLQ, continue, commit |
-| Sure 5xx, timeout, connection refused, at startup **or mid-run** | `Unavailable` after bounded retry (3 attempts, exponential backoff, total under 60 s) | **No commit.** Loop exits, liveness fails, pod restarts, resumes at last committed offset. |
+| Sure 5xx, timeout, connection refused, at startup **or mid-run** | `Unavailable` after bounded retry (3 attempts, backoff 1s then 2s) | **No commit.** Loop exits, liveness fails, pod restarts, resumes at last committed offset. |
 | `SURE_ENABLED=false` | `Skipped("disabled")` | commit |
 | `SURE_DRY_RUN=true` | `Skipped("dry_run")` after logging the intended PATCH | commit |
 
-The `Unavailable` row is the change from the first draft. Previously only a
-startup outage was protected; a mid-replay outage would have converted the
-rest of the backlog into DLQ records at throttle speed. Distinguishing "Sure is
-down" from "this transaction cannot be matched" is the sink's job, and it is
-expressed in the result type rather than in the loop.
+The `Unavailable` row matters. Without it a mid-replay outage would convert
+the rest of the backlog into DLQ records at throttle speed. Distinguishing
+"Sure is down" from "this transaction cannot be matched" is the sink's job,
+and it is expressed in the result type rather than in the loop.
 
 ### DLQ topic
 
@@ -371,7 +359,6 @@ bookkeeper-agent dlq-replay sure       # new: sure-write-failed → categorized,
 The Sure mode tombstones the DLQ entry and republishes the record **as-is** to
 `transactions.categorized`. Both sinks see it again. The Sheets sink skips
 (category already matches, one Sheets read), the Sure sink retries the match.
-This is the path for the data-gap events once the gap is imported.
 
 **No tombstones.** The Sure sink never writes to `transactions.uncategorized`.
 
@@ -388,7 +375,8 @@ prefix from `CategorySink.name` and the Sheets prefix stays `writer`.
 | `bookkeeper.sure.transactions.written` | counter | `match_rung` |
 | `bookkeeper.sure.transactions.skipped` | counter | `reason` |
 | `bookkeeper.sure.transactions.rejected` | counter | `reason` |
-| `bookkeeper.sure.errors` | counter | `kind` |
+| `bookkeeper.sure.match.rung` | counter | `match_rung` |
+| `bookkeeper.sure.errors` | counter | — |
 | `bookkeeper.sure.duration` | timer | — |
 | `bookkeeper.sure.api.duration` | timer | `endpoint`, `status` |
 
@@ -398,32 +386,23 @@ attention.
 
 `PrometheusRule` additions alongside `k8s/app/prometheusrule.yaml`:
 
-- `SureWriterRejectRateHigh`: `rejected` > 20% of processed over 1h. **Will
-  fire during the initial replay** because of the data gap. Silence it for the
-  replay window rather than weakening the rule; after the gap import it is a
-  real signal.
+- `SureWriterRejectRateHigh`: `rejected` > 20% of processed over 1h. Expect
+  it to fire during an initial replay if Sure is missing date ranges the
+  Sheet has. Silence it for the replay window rather than weakening the rule.
 - `SureWriterStalled`: no activity for 24h while the Sheets writer is active.
-- `SureWriterDLQGrowing`: `sure-write-failed` compacted size increasing over 6h.
+- `SureWriterConsumerGroupMembersLow`: no members in `sure-writer` for 5m.
 
 ---
 
-## 9. Out of scope, worth tracking separately
+## 9. Operator prerequisites
 
-Found while investigating. File each as a `bd` issue.
+Before enabling writes against a real Sure instance:
 
-1. **Sure's SimpleFIN feed is stale.** Nothing newer than 2026-09-14; TD stops
-   at 2026-09-08. Sure persists everything SimpleFIN returns, so the staleness
-   is upstream at MX. Needs re-authentication.
-2. **Four duplicate account pairs.** Prerequisite to §5 and §11.
-3. **Two credit cards typed `Depository`** (`TD AEROPLAN VISA`,
-   `TD REWARDS VISA`), so net worth is wrong.
-4. **Data gap 2025-01 through 2026-04.** The Sheet holds 18,898 rows against
-   7,665 imported. Jevin will import; then `dlq-replay sure`.
-5. **Case-duplicate categories** should be merged in Sure.
-6. **Future option, not planned:** Sure's create endpoint has an idempotent
-   `source` + `external_id` path. A bookkeeper-owned ledger in Sure keyed by our
-   `transaction_id` would remove matching entirely. That is the route if the
-   Sheet ever stops being the source. Recorded here so nobody rediscovers it.
+1. Merge any duplicate accounts in Sure (common when both a CSV import and a
+   bank-sync connection created the same account).
+2. Merge any case-duplicate categories.
+3. Write `SURE_ACCOUNT_MAP` using the surviving Sure account IDs.
+4. Create an API key in Sure with transaction read and write scope.
 
 ---
 
@@ -440,26 +419,26 @@ the broker-gated integration style from `3db4d2b`.
 **Unit**
 - `SinkWriter` with a fake sink: each `SinkResult` variant produces exactly the
   action in the §2 table; `Unavailable` leaves the offset uncommitted and calls
-  `onAlive(false)`; the success hook fires for `Written` and `Rejected`, never
-  for `Skipped` or `Unavailable`.
+  `onAlive(false)`; tombstoning fires for `Written` and `Rejected` only when
+  enabled.
 - `TransactionMatcher`: one test per rung; ambiguity yields no match; the
-  ±3-day window includes boundaries and excludes day 4.
-- `AmountConvention`: `"-$384.91"`, `"$1,865.61"`, `"$0.00"`, malformed input;
-  the sign flip in both directions.
-- `CategoryResolver`: case-insensitive hit; duplicate folded name rejects;
-  unknown name rejects.
-- Account map parsing and the ID-based lookup.
+  ±3-day window includes boundaries; unmapped account, bad amount and bad
+  date reject before any API call.
+- `AmountConvention`: `"-$384.91"`, `"$1,865.61"`, `"$0.00"`, plain decimal,
+  malformed input; the sign flip in both directions.
+- `CategoryResolver`: case-insensitive hit; duplicate folded name is
+  ambiguous; unknown name refreshes once then reports unknown.
+- `SureClient`: auth header, filters, pagination, 4xx no retry, 5xx retry then
+  unavailable, connection failure, rate limiting.
 - `SureSink`: already-categorized → `Skipped`; unmatched → `Rejected`;
-  5xx after retries → `Unavailable`; dry run → `Skipped` with zero PATCHes.
+  unavailable anywhere → `Unavailable`; disabled and dry run skip with zero
+  PATCHes.
 
 **Integration (broker-gated, stubbed Sure)**
 - A categorized event produces exactly one PATCH.
 - Match failure produces one DLQ record and no PATCH.
-- Sure unreachable mid-stream: loop exits, no offset commit, no DLQ records.
-- `SURE_DRY_RUN=true` performs zero writes and still commits offsets.
-- Replay from offset 0 respects `SURE_MAX_API_CALLS_PER_SEC` counting GETs.
-- `dlq-replay sure` tombstones the DLQ entry and republishes to `categorized`
-  unchanged.
+- Sure unreachable: loop exits, no offset commit, no DLQ records.
+- `SURE_DRY_RUN=true` performs zero writes.
 
 **Manual gate before enabling writes**
 Deploy with `SURE_DRY_RUN=true`, let the full replay run, review the rung
@@ -470,18 +449,19 @@ distribution and would-be reject reasons.
 ## 11. Rollout
 
 1. **Refactor only.** Extract `SinkWriter` and `SheetsSink`. Ship. Confirm
-   `bookkeeper.writer.*` metrics and behaviour are unchanged for a day.
-2. Merge the four duplicate account pairs in Sure. Fix the two miscategorized
-   credit cards. Record the surviving account IDs in `SURE_ACCOUNT_MAP`.
-3. Add the `sure-write-failed` topic and the `CATEGORIZED` guard via `init`.
+   `bookkeeper.writer.*` metrics and behaviour are unchanged.
+2. Do the operator prerequisites in §9.
+3. Run `init` to add the `sure-write-failed` topic and the `CATEGORIZED`
+   guard.
 4. Deploy `sure-writer` with `SURE_ENABLED=true`, `SURE_DRY_RUN=true`. Inspect
    rung distribution and reject reasons across the full replay.
-5. Fix the account map until rung 2 dominates for post-2026-05 events.
+5. Fix the account map until rung 2 dominates.
 6. Set `SURE_DRY_RUN=false`. Reset the `sure-writer` consumer group to
    earliest to re-replay.
-7. Confirm Sure's uncategorized count drops from 911 and Sheets writer metrics
-   are unchanged throughout.
-8. Later, after the data-gap import: `dlq-replay sure`.
+7. Confirm Sure's uncategorized count drops and Sheets writer metrics are
+   unchanged throughout.
+8. If Sure was missing date ranges and they are later imported:
+   `dlq-replay sure`.
 
 Rollback is `SURE_ENABLED=false`, or scaling `sure-writer` to zero. Nothing in
 the Sheets path depends on the Sure process.
