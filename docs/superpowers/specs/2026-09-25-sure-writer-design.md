@@ -150,8 +150,8 @@ with a fallback ladder, not a field mapping.
 src/main/kotlin/org/jevy/bookkeeper/writer/
     SinkWriter.kt          the shared consumer loop (extracted from CategoryWriter.run)
     CategorySink.kt        interface + SinkResult
-    CategoryWriter.kt      becomes a thin factory: SinkWriter(SheetsSink(...), tombstoneHook)
-    sheets/SheetsSink.kt   writeCategory + findRow, moved verbatim from CategoryWriter
+    CategoryWriter.kt      becomes a thin wrapper: SinkWriter(SheetsSink(...), tombstoneUncategorized = true)
+    SheetsSink.kt          writeCategory + findRow, moved verbatim from CategoryWriter
 src/main/kotlin/org/jevy/bookkeeper/sure/
     SureSink.kt            implements CategorySink; orchestrates match → resolve → patch
     SureClient.kt          HTTP: auth, retry, rate limit, pagination
@@ -285,15 +285,34 @@ up to 100. The response includes each transaction's current `category` and
 
 ```http
 PATCH /api/v1/transactions/:id
-{ "transaction": { "category_id": "<uuid>", "user_modified": true } }
+X-Api-Key: <key>
+{ "transaction": { "category_id": "<uuid>" } }
 ```
 
-Both fields are permitted (`entry_params_for_update`, `transaction_params`).
-`user_modified: true` calls `mark_user_modified!`, which makes
-`Entry#protected_from_sync?` true, so the next SimpleFIN sync links its
-`external_id` rather than overwriting the category. Criterion 4. The update
-path also calls `lock_saved_attributes!`, protecting the write from Sure's own
-enrichment.
+**Do not send `user_modified`.** It is permitted by `transaction_params` but
+only `create` acts on it (`mark_user_modified!`); `update` ignores it.
+Criterion 4 holds by a different mechanism, verified in the running pod:
+`update` calls `@entry.lock_saved_attributes!`, which locks `category_id` on
+the transaction, and the provider import path writes categories through
+`enrich_attribute(:category_id, ...)`, which skips locked attributes. Sure's
+own auto-categorizer additionally only fills a blank category. So a category
+written by PATCH survives both SimpleFIN sync and Sure enrichment.
+
+The `X-Api-Key` header is how `Api::V1::BaseController` authenticates API
+keys.
+
+### Response shape the matcher relies on
+
+`GET /api/v1/transactions` returns `{ "transactions": [...], "pagination":
+{ "page", "per_page", "total_count", "total_pages" } }`. Each transaction has
+`id`, `date` (ISO), `name`, `external_id`, `signed_amount_cents` (integer,
+**income positive, expense negative**, same convention as the Sheet),
+`account { id, name }`, and `category { id, name } | null`.
+
+Compare on `signed_amount_cents`, never on the localized `amount` string. The
+sign flip in §5 applies **only** to the `min_amount`/`max_amount` query
+parameters, which filter on the raw `entries.amount` column where expenses
+are positive.
 
 ### Category resolution
 
