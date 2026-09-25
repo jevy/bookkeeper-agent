@@ -10,14 +10,16 @@ import org.jevy.bookkeeper.metrics.Metrics
 import org.jevy.bookkeeper.producer.TransactionProducer
 import org.jevy.bookkeeper.report.SpendingReport
 import org.jevy.bookkeeper.replay.DlqReplayer
+import org.jevy.bookkeeper.sure.SureSink
 import org.jevy.bookkeeper.writer.CategoryWriter
+import org.jevy.bookkeeper.writer.SinkWriter
 import org.slf4j.LoggerFactory
 
 private val logger = LoggerFactory.getLogger("org.jevy.bookkeeper.Main")
 
 fun main(args: Array<String>) {
     val command = args.firstOrNull() ?: run {
-        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
         System.exit(1)
         return
     }
@@ -49,6 +51,18 @@ fun main(args: Array<String>) {
             Metrics.startHttpServer(config.metricsPort)
             logger.info("Starting Category Writer")
             CategoryWriter(config, meterRegistry = Metrics.registry).run(
+                onActivity = Metrics::updateActivity,
+                onAlive = Metrics::setConsumerAlive,
+            )
+        }
+        "sure-writer" -> {
+            val config = AppConfig.fromEnv()
+            require(config.sureApiUrl.isNotBlank()) { "SURE_API_URL is required for sure-writer" }
+            require(config.sureApiKey.isNotBlank()) { "SURE_API_KEY is required for sure-writer" }
+            Metrics.startHttpServer(config.metricsPort)
+            logger.info("Starting Sure Writer (enabled={}, dryRun={}, accounts mapped={})",
+                config.sureEnabled, config.sureDryRun, config.sureAccountMap.size)
+            SinkWriter(config, SureSink(config, meterRegistry = Metrics.registry), Metrics.registry, tombstoneUncategorized = false).run(
                 onActivity = Metrics::updateActivity,
                 onAlive = Metrics::setConsumerAlive,
             )
@@ -103,7 +117,7 @@ fun main(args: Array<String>) {
         }
         else -> {
             System.err.println("Unknown command: $command")
-            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
             System.exit(1)
         }
     }
