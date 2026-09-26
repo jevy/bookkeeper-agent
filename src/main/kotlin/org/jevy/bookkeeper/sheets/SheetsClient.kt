@@ -1,76 +1,89 @@
 package org.jevy.bookkeeper.sheets
 
-import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport
-import com.google.api.client.json.gson.GsonFactory
-import com.google.api.services.sheets.v4.Sheets
-import com.google.api.services.sheets.v4.SheetsScopes
-import com.google.auth.http.HttpCredentialsAdapter
-import com.google.auth.oauth2.GoogleCredentials
+import com.google.api.client.http.HttpResponseException
 import org.jevy.bookkeeper.config.AppConfig
 import org.slf4j.LoggerFactory
-import com.google.api.client.http.HttpResponseException
-import java.io.ByteArrayInputStream
-import java.io.File
+import kotlin.math.ceil
 
-class SheetsClient(private val config: AppConfig) {
+/**
+ * Google refused the call because the per-minute quota is spent, and backing off did not
+ * clear it. Transient: the caller must report its sink unavailable and let the offset stand,
+ * never dead-letter the record.
+ */
+class SheetsUnavailableException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+
+/**
+ * Every Sheets call the process makes goes through here, so this is where the shared
+ * 60 requests/min/user quota is respected: reads are throttled to [maxReadsPerSec] and
+ * a quota refusal is retried with exponential backoff before it is called unavailable.
+ */
+class SheetsClient(
+    private val config: AppConfig,
+    private val api: SheetsApi = GoogleSheetsApi(config),
+    private val maxReadsPerSec: Double = config.sheetsMaxReadsPerSec,
+    private val maxAttempts: Int = MAX_ATTEMPTS,
+    private val sleeper: (Long) -> Unit = Thread::sleep,
+) {
 
     private val logger = LoggerFactory.getLogger(SheetsClient::class.java)
 
     companion object {
-        internal const val WRITE_MAX_RETRIES = 5
-        internal const val WRITE_RETRY_BASE_MS = 2000L
-    }
+        /** 4 attempts with [RETRY_BASE_MS] backoff sleeps 2s + 4s + 8s: 14 s worst case per
+         *  record, far inside the 360 s max.poll.interval.ms the consumer runs with. */
+        internal const val MAX_ATTEMPTS = 4
+        internal const val RETRY_BASE_MS = 2000L
 
-    private val service: Sheets by lazy {
-        val credentials = loadCredentials()
-        Sheets.Builder(
-            GoogleNetHttpTransport.newTrustedTransport(),
-            GsonFactory.getDefaultInstance(),
-            HttpCredentialsAdapter(credentials)
-        )
-            .setApplicationName("bookkeeper-agent")
-            .build()
-    }
-
-    private fun loadCredentials(): GoogleCredentials {
-        val json = config.googleCredentialsJson
-        val stream = if (File(json).exists()) {
-            File(json).inputStream()
-        } else {
-            ByteArrayInputStream(json.toByteArray())
+        /** True for the 429 / RESOURCE_EXHAUSTED / rateLimitExceeded family, whatever wraps it. */
+        internal fun isRateLimited(e: Throwable): Boolean {
+            if (e is HttpResponseException && e.statusCode == 429) return true
+            val text = generateSequence(e) { it.cause }.take(5).joinToString(" ") { it.message ?: "" }
+            return text.contains("RESOURCE_EXHAUSTED") ||
+                text.contains("rateLimitExceeded") ||
+                text.contains("Quota exceeded")
         }
-        return GoogleCredentials.fromStream(stream)
-            .createScoped(listOf(SheetsScopes.SPREADSHEETS))
     }
 
-    fun readAllRows(range: String = "Transactions!A:U"): List<List<Any>> {
-        val response = service.spreadsheets().values()
-            .get(config.googleSheetId, range)
-            .execute()
-        return response.getValues() ?: emptyList()
-    }
+    private val minIntervalNanos: Long = ceil(1_000_000_000.0 / maxReadsPerSec.coerceAtLeast(0.001)).toLong()
+    private var lastReadNanos = 0L
+
+    fun readAllRows(range: String = "Transactions!A:U"): List<List<Any>> =
+        withRetry("read $range", throttled = true) { api.read(range) }
 
     fun writeCell(range: String, value: String) {
-        val body = com.google.api.services.sheets.v4.model.ValueRange()
-            .setValues(listOf(listOf(value)))
-        for (attempt in 1..WRITE_MAX_RETRIES) {
+        withRetry("write $range", throttled = false) { api.write(range, value) }
+        logger.debug("Wrote '{}' to {}", value, range)
+    }
+
+    /**
+     * Runs [call], retrying only a quota refusal. Any other failure is the caller's
+     * problem and propagates on the first attempt: a bad range is not fixed by waiting.
+     */
+    private fun <T> withRetry(operation: String, throttled: Boolean, call: () -> T): T {
+        var attempt = 0
+        while (true) {
+            attempt++
+            if (throttled) throttleRead()
             try {
-                service.spreadsheets().values()
-                    .update(config.googleSheetId, range, body)
-                    .setValueInputOption("USER_ENTERED")
-                    .execute()
-                logger.debug("Wrote '{}' to {}", value, range)
-                return
-            } catch (e: HttpResponseException) {
-                if (e.statusCode == 429 && attempt < WRITE_MAX_RETRIES) {
-                    val backoffMs = WRITE_RETRY_BASE_MS * (1L shl (attempt - 1))
-                    logger.warn("Rate limited writing to {}, attempt {}/{}, retrying in {}ms", range, attempt, WRITE_MAX_RETRIES, backoffMs)
-                    Thread.sleep(backoffMs)
-                } else {
-                    throw e
+                return call()
+            } catch (e: Exception) {
+                if (!isRateLimited(e)) throw e
+                if (attempt >= maxAttempts) {
+                    throw SheetsUnavailableException(
+                        "Sheets quota still exhausted after $attempt attempts on $operation: ${e.message}", e
+                    )
                 }
+                val backoffMs = RETRY_BASE_MS shl (attempt - 1)
+                logger.warn("Sheets rate limited on {} (attempt {}/{}), retrying in {} ms", operation, attempt, maxAttempts, backoffMs)
+                sleeper(backoffMs)
             }
         }
+    }
+
+    @Synchronized
+    private fun throttleRead() {
+        val wait = lastReadNanos + minIntervalNanos - System.nanoTime()
+        if (lastReadNanos != 0L && wait > 0) sleeper(ceil(wait / 1_000_000.0).toLong())
+        lastReadNanos = System.nanoTime()
     }
 
     fun readCategories(): List<Map<String, String>> {

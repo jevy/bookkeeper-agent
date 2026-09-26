@@ -20,7 +20,7 @@ private val logger = LoggerFactory.getLogger("org.jevy.bookkeeper.Main")
 
 fun main(args: Array<String>) {
     val command = args.firstOrNull() ?: run {
-        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sheets|sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
         System.exit(1)
         return
     }
@@ -87,7 +87,8 @@ fun main(args: Array<String>) {
             val mode = when (args.getOrNull(1)) {
                 null -> ReplayMode.RECATEGORIZE
                 "sure" -> ReplayMode.SURE
-                else -> throw IllegalArgumentException("Unknown dlq-replay mode '${args[1]}'. Use no argument or 'sure'.")
+                "sheets" -> ReplayMode.SHEETS
+                else -> throw IllegalArgumentException("Unknown dlq-replay mode '${args[1]}'. Use no argument, 'sheets' or 'sure'.")
             }
             logger.info("Starting DLQ Replayer ({})", mode)
             DlqReplayer(config, mode).run()
@@ -123,7 +124,7 @@ fun main(args: Array<String>) {
         }
         else -> {
             System.err.println("Unknown command: $command")
-            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sheets|sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
             System.exit(1)
         }
     }

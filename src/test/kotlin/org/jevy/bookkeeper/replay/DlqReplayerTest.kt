@@ -314,4 +314,29 @@ class DlqReplayerTest {
         assertEquals("Groceries", sent.captured.value().getCategory().toString())
         assertEquals("because", sent.captured.value().getCategoryJustification().toString())
     }
+
+    @Test
+    fun `sheets mode republishes write-failed records to categorized with the category intact`() {
+        val (consumer, avroProducer, tombstoneProducer) = setupMocks()
+        every { consumer.partitionsFor(TopicNames.WRITE_FAILED) } returns listOf(partitionInfo(TopicNames.WRITE_FAILED))
+        val partitions = listOf(TopicPartition(TopicNames.WRITE_FAILED, 0))
+
+        val tx = makeTransaction("txn-1", "COSTCO", category = "Groceries", categoryJustification = "because")
+        setupFiniteConsumption(consumer, partitions, listOf(makeConsumerRecords(TopicNames.WRITE_FAILED, tx)))
+
+        val sent = slot<ProducerRecord<String, Transaction>>()
+        every { avroProducer.send(capture(sent)) } returns mockk(relaxed = true)
+
+        DlqReplayer(config, ReplayMode.SHEETS).run()
+
+        // The 678 records stranded by the quota failure already hold correct categories, and
+        // those categories are already in the Sheet. Recategorizing them would spend 678 LLM
+        // calls to arrive back where they started.
+        verify(exactly = 0) { consumer.partitionsFor(TopicNames.CATEGORIZATION_FAILED) }
+        verify { tombstoneProducer.send(match { it.topic() == TopicNames.WRITE_FAILED && it.key() == "txn-1" && it.value() == null }) }
+        assertEquals(TopicNames.CATEGORIZED, sent.captured.topic())
+        assertEquals("txn-1", sent.captured.key())
+        assertEquals("Groceries", sent.captured.value().getCategory().toString())
+        assertEquals("because", sent.captured.value().getCategoryJustification().toString())
+    }
 }

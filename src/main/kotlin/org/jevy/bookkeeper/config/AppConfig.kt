@@ -24,6 +24,13 @@ data class AppConfig(
     val sureDryRun: Boolean = false,
     /** Sheet account name to Sure account id. Written after duplicate accounts are merged in Sure. */
     val sureAccountMap: Map<String, String> = emptyMap(),
+    /**
+     * Sheets reads per second, across every read this process makes. Google allows 60 read
+     * requests per minute per user for the whole service account, and the producer and the
+     * categorizer's sheet_lookup tool draw on the same budget, so the default claims only
+     * half of it. Raise it only when no other component is running against the Sheet.
+     */
+    val sheetsMaxReadsPerSec: Double = 0.5,
 ) {
     companion object {
         fun fromEnv(): AppConfig = AppConfig(
@@ -49,6 +56,7 @@ data class AppConfig(
             sureMaxApiCallsPerSec = System.getenv("SURE_MAX_API_CALLS_PER_SEC")?.toIntOrNull() ?: 5,
             sureDryRun = System.getenv("SURE_DRY_RUN")?.toBooleanStrictOrNull() ?: false,
             sureAccountMap = parseAccountMap(System.getenv("SURE_ACCOUNT_MAP")),
+            sheetsMaxReadsPerSec = System.getenv("SHEETS_MAX_READS_PER_SEC")?.toDoubleOrNull()?.takeIf { it > 0 } ?: 0.5,
         )
 
         private fun requireEnv(name: String): String =
