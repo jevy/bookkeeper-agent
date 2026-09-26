@@ -104,13 +104,37 @@ class SinkWriterTest {
     }
 
     @Test
-    fun `Skipped commits and increments skipped with reason, no DLQ, no tombstone`() {
+    fun `Skipped commits, counts skipped untagged and by reason, no DLQ, tombstones when enabled`() {
         pollOnce("txn-1")
         runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Skipped("already_categorized")), registry, tombstoneUncategorized = true), mutableListOf())
         verify(exactly = 1) { consumer.commitSync() }
         verify(exactly = 0) { dlqProducer.send(any()) }
-        verify(exactly = 0) { tombstoneProducer.send(any()) }
-        assertEquals(1.0, registry.counter("bookkeeper.fake.transactions.skipped", "reason", "already_categorized").count())
+        // Same as the pre-split CategoryWriter: any non-throwing return tombstoned uncategorized.
+        verify { tombstoneProducer.send(match { it.topic() == TopicNames.UNCATEGORIZED && it.key() == "txn-1" && it.value() == null }) }
+        assertEquals(1.0, registry.counter("bookkeeper.fake.transactions.skipped").count())
+        assertEquals(1.0, registry.counter("bookkeeper.fake.transactions.skipped.reasons", "reason", "already_categorized").count())
+    }
+
+    @Test
+    fun `untagged counters exist at zero before any record, so scrapes never see an absent series`() {
+        every { consumer.poll(any<Duration>()) } throws InterruptedException("stop")
+        runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Written), registry), mutableListOf())
+        assertEquals(0.0, registry.counter("bookkeeper.fake.transactions.written").count())
+        assertEquals(0.0, registry.counter("bookkeeper.fake.transactions.skipped").count())
+        assertEquals(0.0, registry.counter("bookkeeper.fake.transactions.rejected").count())
+        assertEquals(0.0, registry.counter("bookkeeper.fake.errors").count())
+    }
+
+    @Test
+    fun `flushes producers before committing so a committed offset never outruns its publish`() {
+        pollOnce("txn-1")
+        runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Written), registry, tombstoneUncategorized = true, publishOnDone = "next.topic"), mutableListOf())
+        verifyOrder {
+            dlqProducer.send(any())
+            dlqProducer.flush()
+            tombstoneProducer.flush()
+            consumer.commitSync()
+        }
     }
 
     @Test
@@ -120,7 +144,8 @@ class SinkWriterTest {
         verify { dlqProducer.send(match { it.topic() == "fake.dlq" && it.key() == "txn-1" && it.value() != null }) }
         verify { tombstoneProducer.send(match { it.topic() == TopicNames.UNCATEGORIZED && it.key() == "txn-1" }) }
         verify(exactly = 1) { consumer.commitSync() }
-        assertEquals(1.0, registry.counter("bookkeeper.fake.transactions.rejected", "reason", "no_match").count())
+        assertEquals(1.0, registry.counter("bookkeeper.fake.transactions.rejected").count())
+        assertEquals(1.0, registry.counter("bookkeeper.fake.transactions.rejected.reasons", "reason", "no_match").count())
         assertEquals(1.0, registry.counter("bookkeeper.fake.errors").count())
     }
 

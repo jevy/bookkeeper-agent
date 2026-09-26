@@ -111,7 +111,13 @@ class SureClient(
                         val text = resp.body?.string() ?: ""
                         when {
                             resp.isSuccessful -> return if (text.isBlank()) JsonObject() else JsonParser.parseString(text).asJsonObject
-                            resp.code in 500..599 -> throw IOException("Sure responded ${resp.code}")
+                            // Auth failures are about this process, not this transaction. Retrying will not
+                            // fix a rotated key, and DLQing would drain the whole backlog. Exit the loop instead.
+                            resp.code == 401 || resp.code == 403 ->
+                                throw SureUnavailableException("Sure rejected the API key (${resp.code}) on $endpoint; check SURE_API_KEY and SURE_API_URL")
+                            // Throttling and timeouts are transient: same treatment as 5xx.
+                            resp.code == 408 || resp.code == 429 || resp.code in 500..599 ->
+                                throw IOException("Sure responded ${resp.code}")
                             else -> throw SureRequestException(resp.code, text)
                         }
                     }

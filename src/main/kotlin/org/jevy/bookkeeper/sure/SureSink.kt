@@ -16,10 +16,10 @@ import org.slf4j.LoggerFactory
  */
 class SureSink(
     private val config: AppConfig,
-    private val client: SureClient = SureClient(config.sureApiUrl, config.sureApiKey, config.sureMaxApiCallsPerSec),
+    private val meterRegistry: MeterRegistry = SimpleMeterRegistry(),
+    private val client: SureClient = SureClient(config.sureApiUrl, config.sureApiKey, config.sureMaxApiCallsPerSec, meterRegistry = meterRegistry),
     private val matcher: TransactionMatcher = TransactionMatcher(client, config.sureAccountMap),
     private val resolver: CategoryResolver = CategoryResolver(client),
-    private val meterRegistry: MeterRegistry = SimpleMeterRegistry(),
 ) : CategorySink {
 
     private val logger = LoggerFactory.getLogger(SureSink::class.java)
@@ -61,7 +61,7 @@ class SureSink(
             }
 
             client.updateCategory(matched.transaction.id, categoryId)
-            meterRegistry.counter("bookkeeper.sure.transactions.written", "match_rung", matched.rung.toString()).increment()
+            // The written counter belongs to SinkWriter (untagged). The per-rung view is bookkeeper.sure.match.rung above.
             logger.info("Wrote category '{}' to Sure transaction {} for {} via rung {}", category, matched.transaction.id, transactionId, matched.rung)
             SinkResult.Written
         } catch (e: SureUnavailableException) {

@@ -33,12 +33,15 @@ spec:
             summary: "Sure writer consumer group has no members"
             description: "Consumer group sure-writer has {{ $value }} members (expected 1)"
         - alert: SureWriterRejectRateHigh
+          # Every term carries "or vector(0)" so an absent series (nothing scraped yet, or the
+          # pod is down) yields 0 instead of collapsing the whole expression to empty.
           expr: |
-            sum(increase(bookkeeper_sure_transactions_rejected_total[1h]))
+            (sum(increase(bookkeeper_sure_transactions_rejected_total[1h])) or vector(0))
               /
-            clamp_min(sum(increase(bookkeeper_sure_transactions_written_total[1h]))
-              + sum(increase(bookkeeper_sure_transactions_skipped_total[1h]))
-              + sum(increase(bookkeeper_sure_transactions_rejected_total[1h])), 1)
+            clamp_min(
+              (sum(increase(bookkeeper_sure_transactions_written_total[1h])) or vector(0))
+              + (sum(increase(bookkeeper_sure_transactions_skipped_total[1h])) or vector(0))
+              + (sum(increase(bookkeeper_sure_transactions_rejected_total[1h])) or vector(0)), 1)
               > 0.2
           for: 1h
           labels:
@@ -48,11 +51,12 @@ spec:
             description: "Expected during an initial replay if Sure is missing date ranges the Sheet has. Silence during replay; investigate afterwards."
         - alert: SureWriterStalled
           expr: |
-            sum(increase(bookkeeper_sure_transactions_written_total[24h])) == 0
-              and sum(increase(bookkeeper_sure_transactions_rejected_total[24h])) == 0
-              and sum(increase(bookkeeper_writer_transactions_written_total[24h])) > 0
+            (sum(increase(bookkeeper_sure_transactions_written_total[24h])) or vector(0)) == 0
+              and (sum(increase(bookkeeper_sure_transactions_rejected_total[24h])) or vector(0)) == 0
+              and (sum(increase(bookkeeper_writer_transactions_written_total[24h])) or vector(0)) > 0
           for: 1h
           labels:
             severity: warning
           annotations:
             summary: "Sure writer has done nothing for 24h while the Sheets writer is active"
+            description: "The Sheets writer wrote categories in the last 24h but the Sure writer neither wrote nor rejected anything. Check the sure-writer pod, its consumer group lag on transactions.written, and SURE_ENABLED."

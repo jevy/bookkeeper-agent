@@ -141,10 +141,13 @@ publishOnDone: String? = null)` per record:
 | Result | Action |
 |---|---|
 | `Written` | increment `written`, tombstone if enabled, publish to `publishOnDone` if set, commit |
-| `Skipped(landed = true)` | increment `skipped{reason}`, publish to `publishOnDone` if set, commit |
-| `Skipped(landed = false)` | increment `skipped{reason}`, commit |
-| `Rejected` | send to `sink.dlqTopic`, tombstone if enabled, increment `errors`, commit |
+| `Skipped(landed = true)` | increment `skipped`, tombstone if enabled, publish to `publishOnDone` if set, commit |
+| `Skipped(landed = false)` | increment `skipped`, tombstone if enabled, commit |
+| `Rejected` | send to `sink.dlqTopic`, tombstone if enabled, increment `errors` and `rejected`, commit |
 | `Unavailable` | do **not** commit, `onAlive(false)`, rethrow. Pod restarts and resumes from the last committed offset. |
+
+Before every commit the loop flushes its producers, so a committed offset can
+never outrun its `transactions.written` publish, DLQ send or tombstone.
 
 The Sheets writer runs with `tombstoneUncategorized = true` and
 `publishOnDone = transactions.written`. The Sure writer runs with neither.
@@ -152,9 +155,10 @@ Publishing on `Skipped(landed = true)` is what makes a Sheets consumer-group
 reset re-emit the whole history for Sure (§4) without rewriting the Sheet.
 
 Tombstoning `transactions.uncategorized` is a Sheets-only concern. Today
-`CategoryWriter` tombstones on failure as well as success (the transaction is
-done from the pipeline's point of view once it is in the DLQ), so the flag
-applies to both `Written` and `Rejected`. The Sure sink never writes to
+`CategoryWriter` tombstones on every non-throwing outcome, including the
+already-categorized skip, and on failure (the transaction is done from the
+pipeline's point of view once it is in the DLQ). The flag therefore applies to
+`Written`, `Skipped` and `Rejected` alike. The Sure sink never writes to
 `transactions.uncategorized`.
 
 **Why still two processes and two consumer groups:** the sinks must fail
@@ -376,8 +380,9 @@ Hazards:
 |---|---|---|
 | No match / ambiguous | `Rejected` | DLQ, continue, commit |
 | Unresolvable or ambiguous category | `Rejected` | DLQ, continue, commit |
-| Sure 4xx | `Rejected` | DLQ, continue, commit |
-| Sure 5xx, timeout, connection refused, at startup **or mid-run** | `Unavailable` after bounded retry (3 attempts, backoff 1s then 2s) | **No commit.** Loop exits, liveness fails, pod restarts, resumes at last committed offset. |
+| Sure 4xx that is about this transaction (400, 404, 422) | `Rejected` | DLQ, continue, commit |
+| Sure 401 or 403 | `Unavailable` immediately, no retry | **No commit.** A rotated API key or a misrouted URL must never drain the backlog into the DLQ. Loop exits, pod restarts. |
+| Sure 408, 429, 5xx, timeout, connection refused, at startup **or mid-run** | `Unavailable` after bounded retry (3 attempts, backoff 1s then 2s) | **No commit.** Loop exits, liveness fails, pod restarts, resumes at last committed offset. |
 | `SURE_ENABLED=false` | `Skipped("disabled")` | commit |
 | `SURE_DRY_RUN=true` | `Skipped("dry_run")` after logging the intended PATCH | commit |
 
@@ -420,13 +425,24 @@ prefix from `CategorySink.name` and the Sheets prefix stays `writer`.
 
 | Metric | Type | Tags |
 |---|---|---|
-| `bookkeeper.sure.transactions.written` | counter | `match_rung` |
-| `bookkeeper.sure.transactions.skipped` | counter | `reason` |
-| `bookkeeper.sure.transactions.rejected` | counter | `reason` |
+| `bookkeeper.sure.transactions.written` | counter | — |
+| `bookkeeper.sure.transactions.skipped` | counter | — |
+| `bookkeeper.sure.transactions.skipped.reasons` | counter | `reason` |
+| `bookkeeper.sure.transactions.rejected` | counter | — |
+| `bookkeeper.sure.transactions.rejected.reasons` | counter | `reason` |
 | `bookkeeper.sure.match.rung` | counter | `match_rung` |
 | `bookkeeper.sure.errors` | counter | — |
 | `bookkeeper.sure.duration` | timer | — |
 | `bookkeeper.sure.api.duration` | timer | `endpoint`, `status` |
+
+The untagged counters are registered at startup so every series exists at
+zero; the alert expressions still guard with `or vector(0)`. The per-reason
+breakdowns use separate names because the Prometheus registry rejects one
+name registered with two different tag-key sets. The Sheets sink gets the
+same shape under `bookkeeper.writer.*`; its pre-existing untagged `written`,
+`skipped`, `errors` and `duration` names are unchanged, and `skipped` no
+longer counts row-not-found, which now lands in `rejected` (and `errors`, as
+before).
 
 `match_rung` is the one to watch: steady state should sit on rungs 1 and 2. A
 drift toward 3–4 means the account map or the amount convention needs

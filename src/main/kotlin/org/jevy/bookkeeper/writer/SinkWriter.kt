@@ -17,12 +17,18 @@ import java.time.Duration
  *
  * [tombstoneUncategorized] is true only for the Sheets sink: once the Sheet has
  * the category (or the record is in the DLQ), the transaction is done from the
- * pipeline's point of view and is removed from transactions.uncategorized.
+ * pipeline's point of view and is removed from transactions.uncategorized. As in
+ * the pre-split CategoryWriter, every non-fatal outcome tombstones.
  *
  * [publishOnDone], when set, republishes the record unchanged to that topic on
  * Written and on Skipped(landed = true). The Sheets writer uses it to feed
  * transactions.written, which is what the Sure writer consumes, so Sure only
  * ever mirrors what actually landed in the Sheet.
+ *
+ * Metrics: the untagged counters are registered eagerly so every series exists
+ * at zero from startup (an absent series breaks PromQL arithmetic). The
+ * per-reason breakdowns live under separate names because the Prometheus
+ * registry refuses one name with two different tag-key sets.
  */
 class SinkWriter(
     private val config: AppConfig,
@@ -34,14 +40,20 @@ class SinkWriter(
     private val logger = LoggerFactory.getLogger("${SinkWriter::class.java.name}.${sink.name}")
 
     private val writtenCounter = meterRegistry.counter("bookkeeper.${sink.name}.transactions.written")
+    private val skippedCounter = meterRegistry.counter("bookkeeper.${sink.name}.transactions.skipped")
+    private val rejectedCounter = meterRegistry.counter("bookkeeper.${sink.name}.transactions.rejected")
     private val errorsCounter = meterRegistry.counter("bookkeeper.${sink.name}.errors")
     private val durationTimer = meterRegistry.timer("bookkeeper.${sink.name}.duration")
 
-    private fun skipped(reason: String) =
-        meterRegistry.counter("bookkeeper.${sink.name}.transactions.skipped", "reason", reason).increment()
+    private fun skipped(reason: String) {
+        skippedCounter.increment()
+        meterRegistry.counter("bookkeeper.${sink.name}.transactions.skipped.reasons", "reason", reason).increment()
+    }
 
-    private fun rejected(reason: String) =
-        meterRegistry.counter("bookkeeper.${sink.name}.transactions.rejected", "reason", reason).increment()
+    private fun rejected(reason: String) {
+        rejectedCounter.increment()
+        meterRegistry.counter("bookkeeper.${sink.name}.transactions.rejected.reasons", "reason", reason).increment()
+    }
 
     fun run(onActivity: () -> Unit = {}, onAlive: (Boolean) -> Unit = {}) {
         val consumer = KafkaFactory.createConsumer(config, sink.consumerGroup)
@@ -76,6 +88,7 @@ class SinkWriter(
                         is SinkResult.Skipped -> {
                             skipped(result.reason)
                             logger.info("Skipped transaction {} ({})", transactionId, result.reason)
+                            tombstoneProducer?.tombstone(transactionId)
                             if (result.landed) publishDone(transactionId, record.value())
                         }
                         is SinkResult.Rejected -> {
@@ -91,6 +104,10 @@ class SinkWriter(
                         }
                     }
                 }
+                // Make every publish, DLQ send and tombstone durable before the offset moves,
+                // so a committed record can never be missing from transactions.written.
+                dlqProducer.flush()
+                tombstoneProducer?.flush()
                 consumer.commitSync()
             }
         } finally {

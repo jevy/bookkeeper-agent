@@ -129,6 +129,25 @@ class SureClientTest {
     }
 
     @Test
+    fun `401 and 403 raise SureUnavailableException immediately, never SureRequestException`() {
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":"unauthorized"}"""))
+        assertThrows<SureUnavailableException> { client().listCategories() }
+        assertEquals(1, server.requestCount)
+        assertTrue(sleeps.isEmpty())
+
+        server.enqueue(MockResponse().setResponseCode(403))
+        assertThrows<SureUnavailableException> { client().updateCategory("t-1", "c-1") }
+    }
+
+    @Test
+    fun `429 retries with backoff then raises SureUnavailableException`() {
+        repeat(3) { server.enqueue(MockResponse().setResponseCode(429)) }
+        assertThrows<SureUnavailableException> { client().listCategories() }
+        assertEquals(3, server.requestCount)
+        assertEquals(listOf(1000L, 2000L), sleeps)
+    }
+
+    @Test
     fun `5xx retries with backoff then raises SureUnavailableException`() {
         repeat(3) { server.enqueue(MockResponse().setResponseCode(503)) }
         assertThrows<SureUnavailableException> { client().listCategories() }

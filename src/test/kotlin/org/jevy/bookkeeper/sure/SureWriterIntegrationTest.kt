@@ -167,7 +167,7 @@ class SureWriterIntegrationTest {
         publish(topics.source, tx("it-nomatch", "4/1/2026"))
         synchronized(patches) { patches.clear() }
 
-        runWriter(config(sureUrl()), topics) { it.count("bookkeeper.sure.transactions.rejected", "reason", "no_match") >= 1.0 }
+        runWriter(config(sureUrl()), topics) { it.count("bookkeeper.sure.transactions.rejected.reasons", "reason", "no_match") >= 1.0 }
 
         assertEquals(listOf("it-nomatch"), dlqRecords(topics.dlq))
         assertEquals(0, synchronized(patches) { patches.size })
@@ -179,7 +179,7 @@ class SureWriterIntegrationTest {
         publish(topics.source, tx("it-dry", "3/1/2026"))
         synchronized(patches) { patches.clear() }
 
-        runWriter(config(sureUrl(), dryRun = true), topics) { it.count("bookkeeper.sure.transactions.skipped", "reason", "dry_run") >= 1.0 }
+        runWriter(config(sureUrl(), dryRun = true), topics) { it.count("bookkeeper.sure.transactions.skipped.reasons", "reason", "dry_run") >= 1.0 }
 
         assertEquals(0, synchronized(patches) { patches.size })
     }

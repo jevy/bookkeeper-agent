@@ -29,7 +29,7 @@ class SureSinkTest {
     private val registry = SimpleMeterRegistry()
 
     private fun sink(enabled: Boolean = true, dryRun: Boolean = false) =
-        SureSink(config(enabled, dryRun), client, matcher, resolver, registry)
+        SureSink(config(enabled, dryRun), meterRegistry = registry, client = client, matcher = matcher, resolver = resolver)
 
     private fun tx(category: String? = "Groceries"): Transaction = Transaction.newBuilder()
         .setTransactionId("txn-1").setDate("2/15/2026").setDescription("COSTCO")
@@ -55,7 +55,27 @@ class SureSinkTest {
         assertEquals(SinkResult.Written, sink().write(tx()))
 
         verify(exactly = 1) { client.updateCategory("s-1", "c-1") }
-        assertEquals(1.0, registry.counter("bookkeeper.sure.transactions.written", "match_rung", "2").count())
+        assertEquals(1.0, registry.counter("bookkeeper.sure.match.rung", "match_rung", "2").count())
+        // SinkWriter owns the untagged written counter; a tagged meter of the same name would be
+        // rejected by the Prometheus registry (same name, different tag keys), so the sink must not create one.
+        assertEquals(null, registry.find("bookkeeper.sure.transactions.written").counter())
+    }
+
+    @Test
+    fun `default client reports api duration into the sink registry`() {
+        val server = okhttp3.mockwebserver.MockWebServer()
+        server.enqueue(okhttp3.mockwebserver.MockResponse().setBody("""{"transactions":[],"pagination":{"page":1,"per_page":100,"total_count":0,"total_pages":1}}"""))
+        server.enqueue(okhttp3.mockwebserver.MockResponse().setBody("""{"transactions":[],"pagination":{"page":1,"per_page":100,"total_count":0,"total_pages":1}}"""))
+        server.start()
+        try {
+            val cfg = config().copy(sureApiUrl = server.url("/").toString().trimEnd('/'), sureMaxApiCallsPerSec = 1000)
+            val realRegistry = SimpleMeterRegistry()
+            SureSink(cfg, meterRegistry = realRegistry).write(tx())
+            assertEquals(true, realRegistry.find("bookkeeper.sure.api.duration").timers().isNotEmpty(),
+                "api.duration must land in the registry given to SureSink, not an orphan")
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test
