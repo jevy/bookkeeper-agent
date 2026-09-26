@@ -5,6 +5,7 @@ import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.TopicNames
 import org.jevy.bookkeeper.sheets.SheetTransaction
 import org.jevy.bookkeeper.sheets.SheetsClient
+import org.jevy.bookkeeper.sheets.SheetsUnavailableException
 import org.jevy.bookkeeper.sheets.TransactionMapper
 import org.jevy.bookkeeper_agent.Transaction
 import org.slf4j.LoggerFactory
@@ -26,9 +27,30 @@ class SheetsSink(
     override val sourceTopic = TopicNames.CATEGORIZED
     override val dlqTopic = TopicNames.WRITE_FAILED
 
-    // Resolve column letters from header row on first use
+    /**
+     * The whole Transactions sheet, read once and held for the life of the process.
+     * A per-record full-sheet read is what exhausted the 60 reads/min/user quota during
+     * the 2026-09 backfill: roughly two reads per record against a budget of sixty a
+     * minute. Cached, a replay costs one cell read per record instead.
+     *
+     * The snapshot goes stale when rows are appended, which would strand those rows'
+     * records in the DLQ, so a lookup miss refreshes it once before giving up. The
+     * per-record cell read below is always live, so a stale row number can never
+     * silently overwrite a category that changed under us.
+     */
+    private var cachedRows: List<List<Any>>? = null
+
+    private fun sheetRows(refresh: Boolean = false): List<List<Any>> {
+        if (refresh || cachedRows == null) {
+            cachedRows = sheetsClient.readAllRows()
+            logger.info("Read {} rows from the Transactions sheet{}", cachedRows!!.size, if (refresh) " (refresh)" else "")
+        }
+        return cachedRows!!
+    }
+
+    // Column letters come from the cached header, so they cost no extra read.
     private val columnLetters: Map<String, String> by lazy {
-        val header = sheetsClient.readAllRows("Transactions!1:1").firstOrNull()?.map { it.toString() } ?: emptyList()
+        val header = sheetRows().firstOrNull()?.map { it.toString() } ?: emptyList()
         header.withIndex().associate { (i, name) -> name to indexToColumnLetter(i) }.also {
             logger.info("Resolved column letters: Category={}, Transaction ID={}, Categorized Date={}",
                 it["Category"], it["Transaction ID"], it["Categorized Date"])
@@ -47,6 +69,10 @@ class SheetsSink(
 
     override fun write(tx: Transaction): SinkResult = try {
         writeCategory(tx)
+    } catch (e: SheetsUnavailableException) {
+        // A spent quota says nothing about this record. Unavailable leaves the offset
+        // uncommitted so the pod restarts and resumes; Rejected would discard the work.
+        SinkResult.Unavailable(e)
     } catch (e: RowNotFoundException) {
         SinkResult.Rejected("row_not_found", e)
     } catch (e: Exception) {
@@ -63,16 +89,9 @@ class SheetsSink(
 
         val transactionId = transaction.getTransactionId().toString()
 
-        val allRows = sheetsClient.readAllRows()
-        if (allRows.isEmpty()) throw RowNotFoundException("No rows found for transaction $transactionId")
-
-        val header = allRows.first().map { it.toString() }
-        val colIndex = header.withIndex().associate { (i, name) -> name to i }
-        val indexed = allRows.drop(1).mapIndexed { i, row ->
-            SheetTransaction(i + 2, TransactionMapper.fromSheetRow(row, colIndex, config.googleSheetId))
-        }
-
-        val rowNumber = findRow(transaction, indexed)
+        // A miss may only mean the cached snapshot predates this row, so refresh once before rejecting.
+        val rowNumber = locate(transaction, sheetRows())
+            ?: locate(transaction, sheetRows(refresh = true))
             ?: throw RowNotFoundException("Could not find row for transaction $transactionId")
 
         val categoryCol = columnLetters["Category"] ?: "C"
@@ -105,6 +124,17 @@ class SheetsSink(
 
         logger.info("Wrote category '{}' to row {} for transaction {}", category, rowNumber, transactionId)
         return SinkResult.Written
+    }
+
+    /** Row number of [transaction] within [allRows], or null when this snapshot has no row for it. */
+    private fun locate(transaction: Transaction, allRows: List<List<Any>>): Int? {
+        if (allRows.isEmpty()) return null
+        val header = allRows.first().map { it.toString() }
+        val colIndex = header.withIndex().associate { (i, name) -> name to i }
+        val indexed = allRows.drop(1).mapIndexed { i, row ->
+            SheetTransaction(i + 2, TransactionMapper.fromSheetRow(row, colIndex, config.googleSheetId))
+        }
+        return findRow(transaction, indexed)
     }
 
     internal fun findRow(target: Transaction, rows: List<SheetTransaction>): Int? {

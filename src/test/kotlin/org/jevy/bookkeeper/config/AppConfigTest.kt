@@ -57,6 +57,24 @@ class AppConfigTest {
     }
 
     @Test
+    fun `sheets read rate defaults to half the quota per second`() {
+        val config = AppConfig(
+            kafkaBootstrapServers = "localhost:9092",
+            schemaRegistryUrl = "http://localhost:8081",
+            googleSheetId = "sheet-123",
+            googleCredentialsJson = "{}",
+            openrouterApiKey = "",
+            maxTransactionAgeDays = 365,
+            maxTransactions = 0,
+            additionalContextPrompt = null,
+            model = "",
+        )
+        // The producer and the categorizer's sheet_lookup share the same 60 reads/min/user
+        // quota, so the writer may claim only part of it.
+        assertEquals(0.5, config.sheetsMaxReadsPerSec)
+    }
+
+    @Test
     fun `parseAccountMap splits name=id pairs on semicolons and trims`() {
         val map = AppConfig.parseAccountMap(" Chequing (1234) = 11111111-aaaa ; Visa=22222222-bbbb;")
         assertEquals(

@@ -15,6 +15,13 @@ enum class ReplayMode {
     RECATEGORIZE,
     /** sure-write-failed: the category is already in the Sheet, back to written unchanged so only the Sure sink retries. */
     SURE,
+    /**
+     * write-failed: the category is right and the categorizer already paid for it, back to
+     * categorized unchanged so only the Sheets sink retries. This is the mode for records
+     * the Sheets sink dead-lettered on a transient failure such as a spent read quota;
+     * [RECATEGORIZE] would strip their categories and buy them again from the LLM.
+     */
+    SHEETS,
 }
 
 class DlqReplayer(private val config: AppConfig, private val mode: ReplayMode = ReplayMode.RECATEGORIZE) {
@@ -29,6 +36,7 @@ class DlqReplayer(private val config: AppConfig, private val mode: ReplayMode = 
         val dlqTopics = when (mode) {
             ReplayMode.RECATEGORIZE -> listOf(TopicNames.CATEGORIZATION_FAILED, TopicNames.WRITE_FAILED)
             ReplayMode.SURE -> listOf(TopicNames.SURE_WRITE_FAILED)
+            ReplayMode.SHEETS -> listOf(TopicNames.WRITE_FAILED)
         }
         val partitions = dlqTopics.flatMap { topic ->
             consumer.partitionsFor(topic)?.map { TopicPartition(it.topic(), it.partition()) } ?: emptyList()
@@ -92,6 +100,7 @@ class DlqReplayer(private val config: AppConfig, private val mode: ReplayMode = 
                 avroProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, key, cleaned))
             }
             ReplayMode.SURE -> avroProducer.send(ProducerRecord(TopicNames.WRITTEN, key, record.value()))
+            ReplayMode.SHEETS -> avroProducer.send(ProducerRecord(TopicNames.CATEGORIZED, key, record.value()))
         }
 
         logger.info("Replayed transaction {} from {} ({})", key, record.topic(), mode)
