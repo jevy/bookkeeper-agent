@@ -24,3 +24,35 @@ spec:
           annotations:
             summary: "Writer consumer group has fewer than 1 member"
             description: "Consumer group category-writer has {{ $value }} members (expected 1)"
+        - alert: SureWriterConsumerGroupMembersLow
+          expr: redpanda_kafka_consumer_group_consumers{redpanda_group="sure-writer"} < 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sure writer consumer group has no members"
+            description: "Consumer group sure-writer has {{ $value }} members (expected 1)"
+        - alert: SureWriterRejectRateHigh
+          expr: |
+            sum(increase(bookkeeper_sure_transactions_rejected_total[1h]))
+              /
+            clamp_min(sum(increase(bookkeeper_sure_transactions_written_total[1h]))
+              + sum(increase(bookkeeper_sure_transactions_skipped_total[1h]))
+              + sum(increase(bookkeeper_sure_transactions_rejected_total[1h])), 1)
+              > 0.2
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sure writer rejecting more than 20% of transactions"
+            description: "Expected during an initial replay if Sure is missing date ranges the Sheet has. Silence during replay; investigate afterwards."
+        - alert: SureWriterStalled
+          expr: |
+            sum(increase(bookkeeper_sure_transactions_written_total[24h])) == 0
+              and sum(increase(bookkeeper_sure_transactions_rejected_total[24h])) == 0
+              and sum(increase(bookkeeper_writer_transactions_written_total[24h])) > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sure writer has done nothing for 24h while the Sheets writer is active"

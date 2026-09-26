@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookkeeper-sure-writer
+  labels:
+    app: bookkeeper
+    component: sure-writer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bookkeeper
+      component: sure-writer
+  template:
+    metadata:
+      labels:
+        app: bookkeeper
+        component: sure-writer
+    spec:
+      containers:
+        - name: sure-writer
+          image: ghcr.io/jevy/bookkeeper-agent:0.8.3
+          args: ["sure-writer"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "redpanda.apps.svc.cluster.local:9093"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://redpanda.apps.svc.cluster.local:8081"
+            - name: GOOGLE_SHEET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: GOOGLE_SHEET_ID
+            - name: GOOGLE_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: bookkeeper
+                  key: GOOGLE_CREDENTIALS_JSON
+            - name: SURE_API_URL
+              value: "http://sure-web.apps.svc.cluster.local:3000"
+            - name: SURE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sure-writer
+                  key: SURE_API_KEY
+            # Merge-time defaults per the rollout: off, and dry-run once turned on.
+            - name: SURE_ENABLED
+              value: "false"
+            - name: SURE_DRY_RUN
+              value: "true"
+            - name: SURE_MAX_API_CALLS_PER_SEC
+              value: "5"
+            - name: SURE_ACCOUNT_MAP
+              valueFrom:
+                secretKeyRef:
+                  name: sure-writer
+                  key: SURE_ACCOUNT_MAP
+          ports:
+            - containerPort: 9091
+              name: metrics
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
