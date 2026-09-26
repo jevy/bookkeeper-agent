@@ -10,14 +10,17 @@ import org.jevy.bookkeeper.metrics.Metrics
 import org.jevy.bookkeeper.producer.TransactionProducer
 import org.jevy.bookkeeper.report.SpendingReport
 import org.jevy.bookkeeper.replay.DlqReplayer
+import org.jevy.bookkeeper.replay.ReplayMode
+import org.jevy.bookkeeper.sure.SureSink
 import org.jevy.bookkeeper.writer.CategoryWriter
+import org.jevy.bookkeeper.writer.SinkWriter
 import org.slf4j.LoggerFactory
 
 private val logger = LoggerFactory.getLogger("org.jevy.bookkeeper.Main")
 
 fun main(args: Array<String>) {
     val command = args.firstOrNull() ?: run {
-        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
         System.exit(1)
         return
     }
@@ -53,6 +56,18 @@ fun main(args: Array<String>) {
                 onAlive = Metrics::setConsumerAlive,
             )
         }
+        "sure-writer" -> {
+            val config = AppConfig.fromEnv()
+            require(config.sureApiUrl.isNotBlank()) { "SURE_API_URL is required for sure-writer" }
+            require(config.sureApiKey.isNotBlank()) { "SURE_API_KEY is required for sure-writer" }
+            Metrics.startHttpServer(config.metricsPort)
+            logger.info("Starting Sure Writer (enabled={}, dryRun={}, accounts mapped={})",
+                config.sureEnabled, config.sureDryRun, config.sureAccountMap.size)
+            SinkWriter(config, SureSink(config, meterRegistry = Metrics.registry), Metrics.registry, tombstoneUncategorized = false).run(
+                onActivity = Metrics::updateActivity,
+                onAlive = Metrics::setConsumerAlive,
+            )
+        }
         "dlq-replay" -> {
             val bootstrapServers = System.getenv("KAFKA_BOOTSTRAP_SERVERS")
                 ?: throw IllegalStateException("Required environment variable KAFKA_BOOTSTRAP_SERVERS is not set")
@@ -69,8 +84,13 @@ fun main(args: Array<String>) {
                 additionalContextPrompt = null,
                 model = "",
             )
-            logger.info("Starting DLQ Replayer")
-            DlqReplayer(config).run()
+            val mode = when (args.getOrNull(1)) {
+                null -> ReplayMode.RECATEGORIZE
+                "sure" -> ReplayMode.SURE
+                else -> throw IllegalArgumentException("Unknown dlq-replay mode '${args[1]}'. Use no argument or 'sure'.")
+            }
+            logger.info("Starting DLQ Replayer ({})", mode)
+            DlqReplayer(config, mode).run()
         }
         "digest-sender" -> {
             val config = AppConfig.fromEnv()
@@ -103,7 +123,7 @@ fun main(args: Array<String>) {
         }
         else -> {
             System.err.println("Unknown command: $command")
-            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|dlq-replay|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
             System.exit(1)
         }
     }

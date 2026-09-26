@@ -34,4 +34,45 @@ class AppConfigTest {
             AppConfig.fromEnv()
         }
     }
+
+    @Test
+    fun `sure fields default to disabled-safe values`() {
+        val config = AppConfig(
+            kafkaBootstrapServers = "localhost:9092",
+            schemaRegistryUrl = "http://localhost:8081",
+            googleSheetId = "sheet-123",
+            googleCredentialsJson = "{}",
+            openrouterApiKey = "",
+            maxTransactionAgeDays = 365,
+            maxTransactions = 0,
+            additionalContextPrompt = null,
+            model = "",
+        )
+        assertEquals("", config.sureApiUrl)
+        assertEquals("", config.sureApiKey)
+        assertEquals(true, config.sureEnabled)
+        assertEquals(5, config.sureMaxApiCallsPerSec)
+        assertEquals(false, config.sureDryRun)
+        assertEquals(emptyMap(), config.sureAccountMap)
+    }
+
+    @Test
+    fun `parseAccountMap splits name=id pairs on semicolons and trims`() {
+        val map = AppConfig.parseAccountMap(" Chequing (1234) = 11111111-aaaa ; Visa=22222222-bbbb;")
+        assertEquals(
+            mapOf("Chequing (1234)" to "11111111-aaaa", "Visa" to "22222222-bbbb"),
+            map,
+        )
+    }
+
+    @Test
+    fun `parseAccountMap of null or blank is empty`() {
+        assertEquals(emptyMap(), AppConfig.parseAccountMap(null))
+        assertEquals(emptyMap(), AppConfig.parseAccountMap("   "))
+    }
+
+    @Test
+    fun `parseAccountMap rejects an entry without an equals sign`() {
+        assertThrows<IllegalArgumentException> { AppConfig.parseAccountMap("Visa") }
+    }
 }

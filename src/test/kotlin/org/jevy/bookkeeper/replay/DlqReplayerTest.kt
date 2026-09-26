@@ -291,4 +291,27 @@ class DlqReplayerTest {
         assertNull(published.getCategory())
         assertNull(published.getCategoryJustification())
     }
+
+    @Test
+    fun `sure mode republishes sure-write-failed records to written unchanged and tombstones the DLQ`() {
+        val (consumer, avroProducer, tombstoneProducer) = setupMocks()
+        every { consumer.partitionsFor(TopicNames.SURE_WRITE_FAILED) } returns listOf(partitionInfo(TopicNames.SURE_WRITE_FAILED))
+        val partitions = listOf(TopicPartition(TopicNames.SURE_WRITE_FAILED, 0))
+
+        val tx = makeTransaction("txn-1", "COSTCO", category = "Groceries", categoryJustification = "because")
+        setupFiniteConsumption(consumer, partitions, listOf(makeConsumerRecords(TopicNames.SURE_WRITE_FAILED, tx)))
+
+        val sent = slot<ProducerRecord<String, Transaction>>()
+        every { avroProducer.send(capture(sent)) } returns mockk(relaxed = true)
+
+        DlqReplayer(config, ReplayMode.SURE).run()
+
+        verify(exactly = 0) { consumer.partitionsFor(TopicNames.WRITE_FAILED) }
+        verify(exactly = 0) { consumer.partitionsFor(TopicNames.CATEGORIZATION_FAILED) }
+        verify { tombstoneProducer.send(match { it.topic() == TopicNames.SURE_WRITE_FAILED && it.key() == "txn-1" && it.value() == null }) }
+        assertEquals(TopicNames.WRITTEN, sent.captured.topic())
+        assertEquals("txn-1", sent.captured.key())
+        assertEquals("Groceries", sent.captured.value().getCategory().toString())
+        assertEquals("because", sent.captured.value().getCategoryJustification().toString())
+    }
 }

@@ -17,6 +17,13 @@ data class AppConfig(
     val sesFromAddress: String = "",
     val digestToAddress: String = "",
     val reportToAddresses: String = "",
+    val sureApiUrl: String = "",
+    val sureApiKey: String = "",
+    val sureEnabled: Boolean = true,
+    val sureMaxApiCallsPerSec: Int = 5,
+    val sureDryRun: Boolean = false,
+    /** Sheet account name to Sure account id. Written after duplicate accounts are merged in Sure. */
+    val sureAccountMap: Map<String, String> = emptyMap(),
 ) {
     companion object {
         fun fromEnv(): AppConfig = AppConfig(
@@ -36,9 +43,28 @@ data class AppConfig(
             sesFromAddress = System.getenv("SES_FROM_ADDRESS") ?: "",
             digestToAddress = System.getenv("DIGEST_TO_ADDRESS") ?: "",
             reportToAddresses = System.getenv("REPORT_TO_ADDRESSES") ?: "",
+            sureApiUrl = System.getenv("SURE_API_URL")?.trimEnd('/') ?: "",
+            sureApiKey = System.getenv("SURE_API_KEY") ?: "",
+            sureEnabled = System.getenv("SURE_ENABLED")?.toBooleanStrictOrNull() ?: true,
+            sureMaxApiCallsPerSec = System.getenv("SURE_MAX_API_CALLS_PER_SEC")?.toIntOrNull() ?: 5,
+            sureDryRun = System.getenv("SURE_DRY_RUN")?.toBooleanStrictOrNull() ?: false,
+            sureAccountMap = parseAccountMap(System.getenv("SURE_ACCOUNT_MAP")),
         )
 
         private fun requireEnv(name: String): String =
             System.getenv(name) ?: throw IllegalStateException("Required environment variable $name is not set")
+
+        /** Parses "Sheet Account Name=sure-account-uuid;Other=uuid". Blank entries are ignored. */
+        fun parseAccountMap(raw: String?): Map<String, String> {
+            if (raw.isNullOrBlank()) return emptyMap()
+            return raw.split(';')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .associate { entry ->
+                    val idx = entry.indexOf('=')
+                    require(idx > 0) { "SURE_ACCOUNT_MAP entry '$entry' must be 'Sheet account name=sure account id'" }
+                    entry.substring(0, idx).trim() to entry.substring(idx + 1).trim()
+                }
+        }
     }
 }

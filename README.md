@@ -18,7 +18,7 @@ Includes a daily email digest so you can review categorizations and reply to cor
 
 ## Architecture
 
-Six services packaged as a single Docker image with different entrypoints, connected via Kafka (Redpanda):
+Seven services packaged as a single Docker image with different entrypoints, connected via Kafka (Redpanda):
 
 ```mermaid
 graph TD
@@ -27,6 +27,7 @@ graph TD
     subgraph "Bookkeeper Agent (self-hosted)"
         Producer["Producer\n(every 5min CronJob)"]
         Writer["Writer\n(Deployment)"]
+        SureWriter["Sure Writer\n(Deployment, optional)"]
         Categorizer["Categorizer\n(AI Agent)"]
         DigestSender["Digest Sender\n(daily 7am CronJob)"]
         EmailIngester["Email Ingester\n(every 5min CronJob)"]
@@ -38,6 +39,8 @@ graph TD
             emailInbox[email.inbox]
             catFailed[transactions.categorization-failed]
             writeFailed[transactions.write-failed]
+            written[transactions.written]
+            sureFailed[transactions.sure-write-failed]
         end
     end
 
@@ -45,6 +48,8 @@ graph TD
         SES[SES]
         S3[S3]
     end
+
+    Sure[(Sure, self-hosted, optional)]
 
     Sheets -- read --> Producer
     Producer -- publish --> uncategorized
@@ -54,6 +59,10 @@ graph TD
 
     categorized -- consume --> Writer
     Writer -- write category --> Sheets
+    Writer -- publish on success --> written
+    written -- consume --> SureWriter
+    SureWriter -- PATCH category --> Sure
+    SureWriter -- on failure --> sureFailed
 
     categorized -- consume --> DigestSender
     DigestSender -- send email --> SES
@@ -74,6 +83,8 @@ graph TD
 **Categorizer** — Deployment (3 replicas). AI agent that consumes uncategorized transactions, researches the correct category using tool calls (sheet history lookup, AutoCat rules, web search), and publishes the result.
 
 **Writer** — Deployment (1 replica). Consumes categorized transactions and writes the category back to the sheet.
+
+**Sure Writer** — Deployment (1 replica). Optional. Consumes `transactions.written`, which the Writer publishes to after a category lands in the Sheet, and mirrors each category into a self-hosted [Sure](https://github.com/we-promise/sure) instance by matching on account, date and amount. The Sheet stays the source of truth; Sure only ever reflects what is in the Sheet. Failures go to `transactions.sure-write-failed`; replay them with `dlq-replay sure`. To backfill an existing history, reset the `category-writer` consumer group to earliest.
 
 ### Email Digest & Correction Pipeline
 
