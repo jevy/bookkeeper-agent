@@ -20,10 +20,17 @@ data class AppConfig(
     val sureApiUrl: String = "",
     val sureApiKey: String = "",
     val sureEnabled: Boolean = true,
-    val sureMaxApiCallsPerSec: Int = 5,
+    /**
+     * Sure throttles the API at 10,000 requests per hour per key (2.8/s), and the sure-writer
+     * and sure-sync share one key. 2/s leaves headroom; a 429 pauses the writer rather than
+     * failing it, so overshooting costs time, not records.
+     */
+    val sureMaxApiCallsPerSec: Int = 2,
     val sureDryRun: Boolean = false,
     /** Sheet account name to Sure account id. Written after duplicate accounts are merged in Sure. */
     val sureAccountMap: Map<String, String> = emptyMap(),
+    /** How far back sure-sync looks in the Sheet. Older rows are left as Sure already has them. */
+    val sureSyncMaxAgeDays: Long = 365,
     /**
      * Sheets reads per second, across every read this process makes. Google allows 60 read
      * requests per minute per user for the whole service account, and the producer and the
@@ -53,9 +60,10 @@ data class AppConfig(
             sureApiUrl = System.getenv("SURE_API_URL")?.trimEnd('/') ?: "",
             sureApiKey = System.getenv("SURE_API_KEY") ?: "",
             sureEnabled = System.getenv("SURE_ENABLED")?.toBooleanStrictOrNull() ?: true,
-            sureMaxApiCallsPerSec = System.getenv("SURE_MAX_API_CALLS_PER_SEC")?.toIntOrNull() ?: 5,
+            sureMaxApiCallsPerSec = System.getenv("SURE_MAX_API_CALLS_PER_SEC")?.toIntOrNull() ?: 2,
             sureDryRun = System.getenv("SURE_DRY_RUN")?.toBooleanStrictOrNull() ?: false,
             sureAccountMap = parseAccountMap(System.getenv("SURE_ACCOUNT_MAP")),
+            sureSyncMaxAgeDays = System.getenv("SURE_SYNC_MAX_AGE_DAYS")?.toLongOrNull()?.takeIf { it > 0 } ?: 365L,
             sheetsMaxReadsPerSec = System.getenv("SHEETS_MAX_READS_PER_SEC")?.toDoubleOrNull()?.takeIf { it > 0 } ?: 0.5,
         )
 

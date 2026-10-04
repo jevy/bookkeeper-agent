@@ -54,19 +54,29 @@ class DlqReplayer(private val config: AppConfig, private val mode: ReplayMode = 
         consumer.seekToBeginning(partitions)
         val endOffsets = consumer.endOffsets(partitions)
 
-        val replayedPerTopic = mutableMapOf<String, Int>()
-
+        // Read to the end first and keep only the latest record per key. Compaction is lazy, so a key
+        // rejected on every pass is still present once per rejection; replaying each copy makes the
+        // sink reject each copy again, and the DLQ doubles every run. A tombstone as the latest
+        // record means an earlier replay drained the key and the sink never put it back.
+        val latest = LinkedHashMap<Pair<String, String>, ConsumerRecord<String, Transaction>?>()
         while (true) {
             val records = consumer.poll(Duration.ofSeconds(2))
             for (record in records) {
-                if (record.key() == null || record.value() == null) continue
-                replayRecord(record, tombstoneProducer, avroProducer)
-                replayedPerTopic.merge(record.topic(), 1) { a, b -> a + b }
+                val key = record.key() ?: continue
+                val id = record.topic() to key
+                latest.remove(id)
+                latest[id] = record.value()?.let { record }
             }
             val allDone = partitions.all { tp ->
                 consumer.position(tp) >= (endOffsets[tp] ?: 0)
             }
             if (allDone) break
+        }
+
+        val replayedPerTopic = mutableMapOf<String, Int>()
+        for (record in latest.values.filterNotNull()) {
+            replayRecord(record, tombstoneProducer, avroProducer)
+            replayedPerTopic.merge(record.topic(), 1) { a, b -> a + b }
         }
 
         tombstoneProducer.flush()

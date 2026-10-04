@@ -2,8 +2,11 @@ package org.jevy.bookkeeper.writer
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.TopicPartition
 import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
@@ -36,6 +39,7 @@ class SinkWriter(
     private val meterRegistry: MeterRegistry = SimpleMeterRegistry(),
     private val tombstoneUncategorized: Boolean = false,
     private val publishOnDone: String? = null,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val logger = LoggerFactory.getLogger("${SinkWriter::class.java.name}.${sink.name}")
 
@@ -44,6 +48,7 @@ class SinkWriter(
     private val rejectedCounter = meterRegistry.counter("bookkeeper.${sink.name}.transactions.rejected")
     private val errorsCounter = meterRegistry.counter("bookkeeper.${sink.name}.errors")
     private val durationTimer = meterRegistry.timer("bookkeeper.${sink.name}.duration")
+    private val throttledCounter = meterRegistry.counter("bookkeeper.${sink.name}.throttled")
 
     private fun skipped(reason: String) {
         skippedCounter.increment()
@@ -74,9 +79,10 @@ class SinkWriter(
 
         try {
             while (true) {
-                val records = consumer.poll(Duration.ofSeconds(5))
+                val records = consumer.poll(Duration.ofSeconds(5)).toList()
                 onActivity()
-                for (record in records) {
+                var throttledFor: Duration? = null
+                for ((index, record) in records.withIndex()) {
                     val transactionId = record.key()
                     val result = durationTimer.recordCallable { sink.write(record.value()) }!!
                     when (result) {
@@ -99,21 +105,55 @@ class SinkWriter(
                             tombstoneProducer?.tombstone(transactionId)
                         }
                         is SinkResult.Unavailable -> {
-                            logger.error("Sink '{}' unavailable while handling {}; exiting without commit", sink.name, transactionId, result.cause)
-                            throw SinkUnavailableException(result.cause)
+                            if (result.retryAfter == null) {
+                                logger.error("Sink '{}' unavailable while handling {}; exiting without commit", sink.name, transactionId, result.cause)
+                                throw SinkUnavailableException(result.cause)
+                            }
+                            throttledCounter.increment()
+                            logger.warn("Sink '{}' throttled while handling {}; pausing {}s and retrying it", sink.name, transactionId, result.retryAfter.seconds)
+                            rewind(consumer, records.subList(index, records.size))
+                            throttledFor = result.retryAfter
                         }
                     }
+                    if (throttledFor != null) break
                 }
                 // Make every publish, DLQ send and tombstone durable before the offset moves,
                 // so a committed record can never be missing from transactions.written.
                 dlqProducer.flush()
                 tombstoneProducer?.flush()
                 consumer.commitSync()
+                throttledFor?.let { waitOut(consumer, it, onActivity) }
             }
         } finally {
             onAlive(false)
             logger.error("Consumer loop exited, marking unhealthy")
         }
+    }
+
+    /** Moves each partition back to its first record in [unprocessed], so the next poll redelivers them. */
+    private fun rewind(consumer: KafkaConsumer<String, Transaction>, unprocessed: List<ConsumerRecord<String, Transaction>>) {
+        unprocessed.groupBy { TopicPartition(it.topic(), it.partition()) }
+            .forEach { (tp, recs) -> consumer.seek(tp, recs.minOf { it.offset() }) }
+    }
+
+    /**
+     * Sits out a throttle with the assignment paused. Polling while paused keeps the consumer in
+     * its group past max.poll.interval.ms, and [onActivity] keeps /healthz green, so the pod is
+     * neither rebalanced away nor restarted by its liveness probe.
+     */
+    private fun waitOut(consumer: KafkaConsumer<String, Transaction>, retryAfter: Duration, onActivity: () -> Unit) {
+        val deadline = clock() + retryAfter.toMillis()
+        consumer.pause(consumer.assignment())
+        while (clock() < deadline) {
+            val stray = consumer.poll(Duration.ofMillis((deadline - clock()).coerceIn(1, 5_000)))
+            // A rebalance during the wait hands partitions back unpaused; their records are not ours yet.
+            if (!stray.isEmpty) {
+                rewind(consumer, stray.toList())
+                consumer.pause(consumer.assignment())
+            }
+            onActivity()
+        }
+        consumer.resume(consumer.paused())
     }
 
     private fun KafkaProducer<String, ByteArray?>.tombstone(transactionId: String) {

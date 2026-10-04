@@ -231,6 +231,52 @@ class DlqReplayerTest {
     }
 
     @Test
+    fun `replays each key once with its latest value, however many copies the DLQ holds`() {
+        // Compaction is lazy, so a key the sink rejected on every replay is still present once per
+        // rejection. Replaying every copy re-rejects every copy and the DLQ doubled nightly in
+        // production (9.3k -> 18.5k -> 37k -> 74k records for 100 keys).
+        val (consumer, avroProducer, tombstoneProducer) = setupMocks()
+        every { consumer.partitionsFor(TopicNames.SURE_WRITE_FAILED) } returns listOf(partitionInfo(TopicNames.SURE_WRITE_FAILED))
+        val tp = TopicPartition(TopicNames.SURE_WRITE_FAILED, 0)
+        val records = ConsumerRecords(mapOf(tp to listOf(
+            ConsumerRecord(TopicNames.SURE_WRITE_FAILED, 0, 0L, "txn-1", makeTransaction("txn-1", "A", category = "Old")),
+            ConsumerRecord(TopicNames.SURE_WRITE_FAILED, 0, 1L, "txn-1", makeTransaction("txn-1", "A", category = "Old")),
+            ConsumerRecord(TopicNames.SURE_WRITE_FAILED, 0, 2L, "txn-2", makeTransaction("txn-2", "B", category = "Groceries")),
+            ConsumerRecord(TopicNames.SURE_WRITE_FAILED, 0, 3L, "txn-1", makeTransaction("txn-1", "A", category = "New")),
+        )))
+        setupFiniteConsumption(consumer, listOf(tp), listOf(records))
+
+        val sent = mutableListOf<ProducerRecord<String, Transaction>>()
+        every { avroProducer.send(capture(sent)) } returns mockk(relaxed = true)
+
+        DlqReplayer(config, ReplayMode.SURE).run()
+
+        assertEquals(setOf("txn-1" to "New", "txn-2" to "Groceries"), sent.map { it.key() to it.value().getCategory().toString() }.toSet())
+        assertEquals(2, sent.size)
+        verify(exactly = 1) { tombstoneProducer.send(match { it.key() == "txn-1" }) }
+        verify(exactly = 1) { tombstoneProducer.send(match { it.key() == "txn-2" }) }
+    }
+
+    @Test
+    fun `does not replay a key whose latest record is a tombstone`() {
+        // A tombstone after the value means an earlier replay already took the record out of the DLQ
+        // and the sink did not put it back, i.e. it succeeded.
+        val (consumer, avroProducer, tombstoneProducer) = setupMocks()
+        every { consumer.partitionsFor(TopicNames.SURE_WRITE_FAILED) } returns listOf(partitionInfo(TopicNames.SURE_WRITE_FAILED))
+        val tp = TopicPartition(TopicNames.SURE_WRITE_FAILED, 0)
+        val records = ConsumerRecords(mapOf(tp to listOf(
+            ConsumerRecord(TopicNames.SURE_WRITE_FAILED, 0, 0L, "txn-1", makeTransaction("txn-1", "A", category = "Groceries")),
+            ConsumerRecord<String, Transaction>(TopicNames.SURE_WRITE_FAILED, 0, 1L, "txn-1", null),
+        )))
+        setupFiniteConsumption(consumer, listOf(tp), listOf(records))
+
+        DlqReplayer(config, ReplayMode.SURE).run()
+
+        verify(exactly = 0) { avroProducer.send(any()) }
+        verify(exactly = 0) { tombstoneProducer.send(any()) }
+    }
+
+    @Test
     fun `does nothing when DLQ topics have no records`() {
         val (consumer, avroProducer, tombstoneProducer) = setupMocks()
         val partitions = setupPartitions(consumer, listOf(TopicNames.CATEGORIZATION_FAILED, TopicNames.WRITE_FAILED))

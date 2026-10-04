@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.time.Duration
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class SinkWriterTest {
 
@@ -200,5 +201,82 @@ class SinkWriterTest {
         pollOnce("txn-2")
         runUntilStopped(SinkWriter(config, FakeSink(SinkResult.Written), registry), mutableListOf())
         verify(exactly = 0) { dlqProducer.send(any()) }
+    }
+
+    @Test
+    fun `Unavailable with retryAfter pauses, keeps the pod healthy, then retries the same record`() {
+        // Sure throttles per hour. Exiting on a 429 crash-looped the pod 75 times in a week and
+        // never cleared the throttle, because every restart went straight back to Sure.
+        val tp = TopicPartition("fake.source", 0)
+        val records = ConsumerRecords(mapOf(tp to listOf(ConsumerRecord("fake.source", 0, 7L, "txn-1", tx("txn-1")))))
+        every { consumer.assignment() } returns setOf(tp)
+        every { consumer.paused() } returns setOf(tp)
+
+        var now = 0L
+        var polls = 0
+        var redelivered = false
+        every { consumer.poll(any<Duration>()) } answers {
+            polls++
+            when {
+                polls == 1 -> records
+                now < 60_000 -> { now += 10_000; ConsumerRecords(emptyMap()) }
+                !redelivered -> { redelivered = true; records }
+                else -> throw InterruptedException("stop")
+            }
+        }
+
+        val results = ArrayDeque(listOf(SinkResult.Unavailable(RuntimeException("429"), Duration.ofSeconds(60)), SinkResult.Written))
+        val seen = mutableListOf<String>()
+        val sink = object : CategorySink {
+            override val name = "fake"
+            override val consumerGroup = "fake-group"
+            override val sourceTopic = "fake.source"
+            override val dlqTopic = "fake.dlq"
+            override fun write(tx: Transaction): SinkResult { seen += tx.getTransactionId().toString(); return results.removeFirst() }
+        }
+        val alive = mutableListOf<Boolean>()
+        var activity = 0
+
+        try {
+            SinkWriter(config, sink, registry, clock = { now }).run(onActivity = { activity++ }, onAlive = { alive += it })
+        } catch (_: InterruptedException) {}
+
+        assertEquals(listOf("txn-1", "txn-1"), seen)
+        verifyOrder {
+            consumer.seek(tp, 7L)
+            consumer.pause(setOf(tp))
+            consumer.resume(setOf(tp))
+        }
+        verify(exactly = 0) { dlqProducer.send(match { it.topic() == "fake.dlq" }) }
+        assertTrue(activity >= 7, "liveness must be fed while paused, got $activity")
+        assertEquals(listOf(true, false), alive)
+        assertEquals(1.0, registry.counter("bookkeeper.fake.throttled").count())
+        assertEquals(1.0, registry.counter("bookkeeper.fake.transactions.written").count())
+    }
+
+    @Test
+    fun `records a rebalance hands back while paused are rewound, not dropped`() {
+        val tp = TopicPartition("fake.source", 0)
+        val first = ConsumerRecords(mapOf(tp to listOf(ConsumerRecord("fake.source", 0, 3L, "txn-1", tx("txn-1")))))
+        val stray = ConsumerRecords(mapOf(tp to listOf(ConsumerRecord("fake.source", 0, 3L, "txn-1", tx("txn-1")))))
+        every { consumer.assignment() } returns setOf(tp)
+        every { consumer.paused() } returns setOf(tp)
+
+        var now = 0L
+        var polls = 0
+        every { consumer.poll(any<Duration>()) } answers {
+            polls++
+            when (polls) {
+                1 -> first
+                2 -> { now += 10_000; stray }
+                else -> throw InterruptedException("stop")
+            }
+        }
+        val sink = FakeSink(SinkResult.Unavailable(RuntimeException("429"), Duration.ofSeconds(60)))
+
+        try { SinkWriter(config, sink, registry, clock = { now }).run() } catch (_: InterruptedException) {}
+
+        assertEquals(listOf("txn-1"), sink.seen)
+        verify(exactly = 2) { consumer.seek(tp, 3L) }
     }
 }

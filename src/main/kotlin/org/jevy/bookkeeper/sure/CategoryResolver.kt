@@ -8,8 +8,9 @@ sealed interface CategoryResolution {
 }
 
 /**
- * Sure category name to id. Case-insensitive. Fetched once, refreshed on a miss so a
- * category created in Sure after startup is picked up. Never creates categories.
+ * Sure category name to id. Case-insensitive. Fetched once, refreshed on a miss or an
+ * ambiguity so categories created or merged in Sure after startup are picked up. Never
+ * creates categories.
  */
 class CategoryResolver(private val client: SureClient) {
 
@@ -23,7 +24,10 @@ class CategoryResolver(private val client: SureClient) {
     @Synchronized
     fun resolve(name: String): CategoryResolution {
         val key = fold(name)
-        val ids = (byFoldedName ?: load())[key] ?: load()[key] ?: return CategoryResolution.Unknown
+        val cached = (byFoldedName ?: load())[key]
+        // A miss or an ambiguity may be stale: the category may since have been created, or the
+        // duplicates merged, in Sure. Re-fetch once before giving a verdict.
+        val ids = cached?.takeIf { it.size == 1 } ?: load()[key] ?: return CategoryResolution.Unknown
         return if (ids.size == 1) CategoryResolution.Resolved(ids[0]) else CategoryResolution.Ambiguous(ids)
     }
 }
