@@ -134,6 +134,14 @@ class SureSinkTest {
     }
 
     @Test
+    fun `Sure throttling is Unavailable carrying the retry delay, so the writer pauses instead of exiting`() {
+        every { matcher.match(any()) } throws SureRateLimitedException(java.time.Duration.ofSeconds(60), "GET /transactions")
+        val result = sink().write(tx())
+        assertIs<SinkResult.Unavailable>(result)
+        assertEquals(java.time.Duration.ofSeconds(60), result.retryAfter)
+    }
+
+    @Test
     fun `Sure unavailable anywhere is Unavailable, never Rejected`() {
         every { matcher.match(any()) } throws SureUnavailableException("connection refused")
         assertIs<SinkResult.Unavailable>(sink().write(tx()))

@@ -28,6 +28,7 @@ graph TD
         Producer["Producer\n(every 5min CronJob)"]
         Writer["Writer\n(Deployment)"]
         SureWriter["Sure Writer\n(Deployment, optional)"]
+        SureSync["Sure Sync\n(CronJob, optional)"]
         Categorizer["Categorizer\n(AI Agent)"]
         DigestSender["Digest Sender\n(daily 7am CronJob)"]
         EmailIngester["Email Ingester\n(every 5min CronJob)"]
@@ -60,6 +61,8 @@ graph TD
     categorized -- consume --> Writer
     Writer -- write category --> Sheets
     Writer -- publish on success --> written
+    Sheets -- read categorized rows --> SureSync
+    SureSync -- publish new or changed --> written
     written -- consume --> SureWriter
     SureWriter -- PATCH category --> Sure
     SureWriter -- on failure --> sureFailed
@@ -86,7 +89,9 @@ graph TD
 
 Google allows 60 read requests per minute per user across the whole service account, and the Producer and the Categorizer's `sheet_lookup` tool draw on the same budget, so the Writer reads at `SHEETS_MAX_READS_PER_SEC` (default `0.5`) and holds one snapshot of the Transactions sheet for the life of the process. A quota refusal (429 / `RESOURCE_EXHAUSTED` / `rateLimitExceeded`) is retried with backoff and, if it never clears, reported as unavailable: the pod exits without committing the offset and resumes on restart. Only a genuinely unwritable record, such as one with no row in the sheet, goes to `transactions.write-failed`. Replay that DLQ with `dlq-replay sheets`, which republishes each record to `transactions.categorized` with its category intact so only the Sheets write is retried; plain `dlq-replay` strips categories and sends records back through the Categorizer, buying every one of them from the LLM again.
 
-**Sure Writer** — Deployment (1 replica). Optional. Consumes `transactions.written`, which the Writer publishes to after a category lands in the Sheet, and mirrors each category into a self-hosted [Sure](https://github.com/we-promise/sure) instance by matching on account, date and amount. The Sheet stays the source of truth; Sure only ever reflects what is in the Sheet. Failures go to `transactions.sure-write-failed`; replay them with `dlq-replay sure`. To backfill an existing history, reset the `category-writer` consumer group to earliest.
+**Sure Writer** — Deployment (1 replica). Optional. Consumes `transactions.written`, which the Writer publishes to after a category lands in the Sheet, and mirrors each category into a self-hosted [Sure](https://github.com/we-promise/sure) instance by matching on account, date and amount. The Sheet stays the source of truth; Sure only ever reflects what is in the Sheet. Failures go to `transactions.sure-write-failed`; replay them with `dlq-replay sure`, which replays each key once with its latest value. A 429 from Sure's API throttle (10,000 requests/hour per key) pauses the consumer and retries the same record; it never dead-letters or restarts the pod.
+
+**Sure Sync** — CronJob. Optional. Publishes to `transactions.written` every categorized Sheet row from the last `SURE_SYNC_MAX_AGE_DAYS` (default 365) whose category differs from the latest one already on that topic, so categories set by Tiller AutoCat or by hand reach Sure too, and re-categorizations in the Sheet propagate. Rows already in sync cost no Sure calls; accounts missing from `SURE_ACCOUNT_MAP` are skipped. To backfill an existing history, reset the `category-writer` consumer group to earliest.
 
 ### Email Digest & Correction Pipeline
 

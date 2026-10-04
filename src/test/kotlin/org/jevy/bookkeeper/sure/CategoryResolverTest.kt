@@ -49,4 +49,15 @@ class CategoryResolverTest {
         )
         assertEquals(CategoryResolution.Resolved("c-9"), CategoryResolver(client).resolve("New Thing"))
     }
+
+    @Test
+    fun `an ambiguity merged away in Sure after startup resolves on refresh`() {
+        // Merging "groceries" into "Groceries" in Sure must take effect without restarting the writer.
+        every { client.listCategories() } returnsMany listOf(
+            listOf(SureCategory("c-1", "Groceries"), SureCategory("c-2", "groceries")),
+            listOf(SureCategory("c-1", "Groceries")),
+        )
+        val r = CategoryResolver(client)
+        assertEquals(CategoryResolution.Resolved("c-1"), r.resolve("Groceries"))
+    }
 }

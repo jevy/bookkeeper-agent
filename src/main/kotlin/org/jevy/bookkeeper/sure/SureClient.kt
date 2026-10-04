@@ -13,6 +13,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.math.BigDecimal
+import java.time.Duration
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
@@ -30,7 +31,16 @@ data class SureTransaction(
 data class SureCategory(val id: String, val name: String)
 
 /** Sure could not be reached or answered 5xx after all retries. Never DLQ on this. */
-class SureUnavailableException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+open class SureUnavailableException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+
+/**
+ * Sure's API throttle refused the call: Rack::Attack allows 10,000 requests per hour per
+ * key when self-hosted. The window is hourly, so a few seconds of backoff never clears it;
+ * the caller should stop consuming for [retryAfter] and try again. Sure always answers
+ * Retry-After: 60 here, whatever the real time to reset.
+ */
+class SureRateLimitedException(val retryAfter: Duration, endpoint: String) :
+    SureUnavailableException("Sure throttled $endpoint (429); retry after ${retryAfter.seconds}s")
 
 /** Sure answered 4xx. The request itself is wrong; safe to DLQ. */
 class SureRequestException(val status: Int, val body: String) : RuntimeException("Sure responded $status: $body")
@@ -115,8 +125,14 @@ class SureClient(
                             // fix a rotated key, and DLQing would drain the whole backlog. Exit the loop instead.
                             resp.code == 401 || resp.code == 403 ->
                                 throw SureUnavailableException("Sure rejected the API key (${resp.code}) on $endpoint; check SURE_API_KEY and SURE_API_URL")
-                            // Throttling and timeouts are transient: same treatment as 5xx.
-                            resp.code == 408 || resp.code == 429 || resp.code in 500..599 ->
+                            // Sure's throttle counts per hour, so the 1 s / 2 s backoff below would only
+                            // spend two more requests against a window that has not reset.
+                            resp.code == 429 -> throw SureRateLimitedException(
+                                Duration.ofSeconds(resp.header("Retry-After")?.trim()?.toLongOrNull()?.coerceAtLeast(1) ?: 60),
+                                endpoint,
+                            )
+                            // Timeouts and server errors are transient.
+                            resp.code == 408 || resp.code in 500..599 ->
                                 throw IOException("Sure responded ${resp.code}")
                             else -> throw SureRequestException(resp.code, text)
                         }

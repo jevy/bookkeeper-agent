@@ -12,6 +12,7 @@ import org.jevy.bookkeeper.report.SpendingReport
 import org.jevy.bookkeeper.replay.DlqReplayer
 import org.jevy.bookkeeper.replay.ReplayMode
 import org.jevy.bookkeeper.sure.SureSink
+import org.jevy.bookkeeper.sure.SureSync
 import org.jevy.bookkeeper.writer.CategoryWriter
 import org.jevy.bookkeeper.writer.SinkWriter
 import org.slf4j.LoggerFactory
@@ -20,7 +21,7 @@ private val logger = LoggerFactory.getLogger("org.jevy.bookkeeper.Main")
 
 fun main(args: Array<String>) {
     val command = args.firstOrNull() ?: run {
-        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sheets|sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+        System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|sure-sync|dlq-replay [sheets|sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
         System.exit(1)
         return
     }
@@ -67,6 +68,13 @@ fun main(args: Array<String>) {
                 onActivity = Metrics::updateActivity,
                 onAlive = Metrics::setConsumerAlive,
             )
+        }
+        "sure-sync" -> {
+            val config = AppConfig.fromEnv()
+            require(config.sureAccountMap.isNotEmpty()) { "SURE_ACCOUNT_MAP is required for sure-sync" }
+            logger.info("Starting Sure Sync (max age {} days, accounts mapped={})", config.sureSyncMaxAgeDays, config.sureAccountMap.size)
+            SureSync(config, Metrics.registry).run()
+            config.pushgatewayUrl?.let { Metrics.pushToGateway(it, "bookkeeper-sure-sync") }
         }
         "dlq-replay" -> {
             val bootstrapServers = System.getenv("KAFKA_BOOTSTRAP_SERVERS")
@@ -124,7 +132,7 @@ fun main(args: Array<String>) {
         }
         else -> {
             System.err.println("Unknown command: $command")
-            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|dlq-replay [sheets|sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
+            System.err.println("Usage: bookkeeper-agent <init|producer|categorizer|writer|sure-writer|sure-sync|dlq-replay [sheets|sure]|digest-sender|email-ingester|email-processor|weekly-report|monthly-report>")
             System.exit(1)
         }
     }

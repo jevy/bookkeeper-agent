@@ -10,6 +10,7 @@ import org.junit.jupiter.api.assertThrows
 import java.math.BigDecimal
 import java.time.LocalDate
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -140,11 +141,20 @@ class SureClientTest {
     }
 
     @Test
-    fun `429 retries with backoff then raises SureUnavailableException`() {
-        repeat(3) { server.enqueue(MockResponse().setResponseCode(429)) }
-        assertThrows<SureUnavailableException> { client().listCategories() }
-        assertEquals(3, server.requestCount)
-        assertEquals(listOf(1000L, 2000L), sleeps)
+    fun `429 raises SureRateLimitedException at once carrying Retry-After, without spending retries`() {
+        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "60"))
+        val e = assertThrows<SureRateLimitedException> { client().listCategories() }
+        assertEquals(java.time.Duration.ofSeconds(60), e.retryAfter)
+        assertEquals(1, server.requestCount)
+        assertTrue(sleeps.isEmpty())
+    }
+
+    @Test
+    fun `429 without Retry-After waits 60 s and is still a SureUnavailableException`() {
+        server.enqueue(MockResponse().setResponseCode(429))
+        val e = assertThrows<SureUnavailableException> { client().listCategories() }
+        assertIs<SureRateLimitedException>(e)
+        assertEquals(java.time.Duration.ofSeconds(60), e.retryAfter)
     }
 
     @Test

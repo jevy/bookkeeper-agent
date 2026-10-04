@@ -64,6 +64,8 @@ class SureSink(
             // The written counter belongs to SinkWriter (untagged). The per-rung view is bookkeeper.sure.match.rung above.
             logger.info("Wrote category '{}' to Sure transaction {} for {} via rung {}", category, matched.transaction.id, transactionId, matched.rung)
             SinkResult.Written
+        } catch (e: SureRateLimitedException) {
+            SinkResult.Unavailable(e, retryAfter = e.retryAfter)
         } catch (e: SureUnavailableException) {
             SinkResult.Unavailable(e)
         } catch (e: SureRequestException) {

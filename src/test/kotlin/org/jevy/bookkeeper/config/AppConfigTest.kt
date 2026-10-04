@@ -51,7 +51,7 @@ class AppConfigTest {
         assertEquals("", config.sureApiUrl)
         assertEquals("", config.sureApiKey)
         assertEquals(true, config.sureEnabled)
-        assertEquals(5, config.sureMaxApiCallsPerSec)
+        assertEquals(2, config.sureMaxApiCallsPerSec)
         assertEquals(false, config.sureDryRun)
         assertEquals(emptyMap(), config.sureAccountMap)
     }
