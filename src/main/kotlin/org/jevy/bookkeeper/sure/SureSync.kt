@@ -110,11 +110,13 @@ class SureSync(
         /** Reduces a topic's records, in offset order, to the latest category per key. A tombstone forgets the key. */
         fun latestCategories(records: Iterable<Pair<String, Transaction?>>): Map<String, String> {
             val latest = HashMap<String, String>()
-            for ((key, value) in records) {
-                val category = value?.getCategory()?.toString()
-                if (category == null) latest.remove(key) else latest[key] = category
-            }
+            for ((key, value) in records) latest.record(key, value)
             return latest
+        }
+
+        private fun MutableMap<String, String>.record(key: String, value: Transaction?) {
+            val category = value?.getCategory()?.toString()
+            if (category == null) remove(key) else this[key] = category
         }
 
         internal fun loadLatestCategories(config: AppConfig): Map<String, String> {
@@ -125,13 +127,15 @@ class SureSync(
                 consumer.assign(partitions)
                 consumer.seekToBeginning(partitions)
                 val endOffsets = consumer.endOffsets(partitions)
-                val seen = mutableListOf<Pair<String, Transaction?>>()
+                // Reduce as we read. The topic holds every copy ever published (148k records for
+                // ~5k keys in production), and buffering them all exhausted a 512Mi pod's heap.
+                val latest = HashMap<String, String>()
                 while (partitions.any { consumer.position(it) < (endOffsets[it] ?: 0) }) {
                     for (record in consumer.poll(Duration.ofSeconds(2))) {
-                        record.key()?.let { seen += it to record.value() }
+                        record.key()?.let { latest.record(it, record.value()) }
                     }
                 }
-                latestCategories(seen)
+                latest
             }
         }
     }
